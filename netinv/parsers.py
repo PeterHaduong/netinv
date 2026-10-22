@@ -252,7 +252,7 @@ def parse_fex(text):
     states = [s.lower().split() for s in FEX_STATES]
     for line in text.split('\n'):
         tok = line.split()
-        if len(tok) < 3 or not re.match(r'^\d{3,4}$', tok[0]):
+        if len(tok) < 2 or not re.match(r'^\d{3,4}$', tok[0]):
             continue
         found = None
         for i in range(len(tok) - 1, 0, -1):            # rightmost state that leaves <= 2 tokens
@@ -270,23 +270,16 @@ def parse_fex(text):
                            'model': after[0] if after else '', 'serial': after[1] if len(after) > 1 else ''}
             continue
         m = re.match(r'^\s*(\d{3,4})\s+(\S.*?)\s{2,}(\S.*?)\s{2,}(\S+)\s+(\S+)\s*$', line)
-        if m:                                             # unknown state word: column spacing
+        if m and not _RACK_RU.search(m.group(3)):      # unknown state word: column spacing
             out[m.group(1)] = {'description': m.group(2), 'state': m.group(3),
                                'model': m.group(4), 'serial': m.group(5)}
+        else:                                             # number + description only
+            out[tok[0]] = {'description': ' '.join(tok[1:]), 'state': '', 'model': '', 'serial': ''}
     return out
 
 
-_FEX_PLACE = re.compile(r'^(?:\d{3,4}\s+)?(?P<room>\S+)\s+(?P<rack>[A-Za-z0-9]+)-(?P<ru>\d{1,2})$')
-
-
-def fex_location(description, number=''):
-    """A FEX description written as '[number] room rack-RU' -> 'Room ab1, rack ab10, RU 43'
-    ('101 ab1 ab10-43'). Other descriptions -> '' (they are shown as they are)."""
-    text = (description or '').strip()
-    if number and text.split()[:1] == [number] and len(text.split()) == 1:
-        return ''
-    m = _FEX_PLACE.match(text)
-    return ('Room %s, rack %s, RU %s' % (m.group('room'), m.group('rack'), m.group('ru'))) if m else ''
+# Description text such as a rack-RU ('ZZ30-41') must never be taken for a FEX state.
+_RACK_RU = re.compile(r'\S+-\d{1,2}(?:\s|$)')
 
 
 def parse_vdc(text):

@@ -106,7 +106,7 @@ def inventory_sheet(network, devices):
             else:
                 status = ' / '.join(x for x in (it['status'], it['role']) if x)
                 rows.append([host, unit, kind, it['pid'], it['serial'], '', '', it['descr'], it['sw'],
-                             status, '', '', '', '', '', it.get('notes', '')])
+                             status, '', '', it.get('location', ''), '', '', it.get('notes', '')])
         for r in range(first + 1, len(rows)):
             outline[r] = 1
         blocks.append((first, len(rows) - 1))
@@ -227,7 +227,7 @@ def workbook_for_networks(networks, changes=None, baselines=None, about=None):
                 unit = ('%s(%s)' % (d['hostname'], it['slot']) if it['kind'] == 'stack_member'
                         else ('%s(%s)' % (d['hostname'], it['member']) if it['member'].isdigit()
                               else unit_name(it)))
-                hw_rows.append([name, d['site'] or d['location'], display_name(d), unit,
+                hw_rows.append([name, it.get('location') or d['site'] or d['location'], display_name(d), unit,
                                 KIND_LABELS.get(it['kind'], it['kind']), it['name'], it['descr'],
                                 it['pid'], it['vid'], it['serial'], it['status'], it['role'], it['sw'],
                                 it.get('first_seen', ''), it.get('last_seen', ''), seen_text(it),

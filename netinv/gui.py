@@ -742,7 +742,8 @@ class App(object):
                 if it.get('gaps'):
                     note += ' (came back %dx)' % it['gaps']
                 out.append((unit, (kind, it['pid'], it['serial'], '', it['sw'],
-                                   ' / '.join(x for x in (it['status'], it['role']) if x), '', '', note)))
+                                   ' / '.join(x for x in (it['status'], it['role']) if x), '',
+                                   it.get('location', ''), note)))
         return out
 
     def _expand(self, state):

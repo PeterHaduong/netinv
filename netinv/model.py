@@ -315,10 +315,10 @@ def _finish_device(dev, nodes):
             num = it['member'].replace('FEX ', '')
             st = dev['fex_status'].get(num, {})
             it['status'] = st.get('state', '')
-            it['role'] = st.get('description', '')
-            it['notes'] = parsers.fex_location(st.get('description'), num) or it.get('notes', '')
-            if st and st.get('state', '').lower() != 'online':
-                dev['warnings'].append('%s state: %s' % (it['member'], st.get('state')))
+            it['role'] = ''
+            it['location'] = st.get('description', '')     # the 'show fex' description: where it is
+            if st.get('state') and st['state'].lower() != 'online':
+                dev['warnings'].append('%s state: %s' % (it['member'], st['state']))
     in_inventory_fex = set(it['member'] for it in hw if it['kind'] == 'fex')
     for num, st in sorted(dev['fex_status'].items()):
         if 'FEX ' + num in in_inventory_fex:
@@ -327,13 +327,13 @@ def _finish_device(dev, nodes):
         if serial:            # e.g. show inventory cut short: take the FEX from show fex
             hw.append({'kind': 'fex', 'slot': '', 'member': 'FEX ' + num, 'name': 'FEX %s CHASSIS' % num,
                        'descr': st.get('model', ''), 'pid': st.get('model', ''), 'vid': '', 'serial': serial,
-                       'status': st.get('state', ''), 'sw': '', 'role': st.get('description', ''),
-                       'notes': parsers.fex_location(st.get('description'), num)})
+                       'status': st.get('state', ''), 'sw': '', 'role': '',
+                       'location': st.get('description', '')})
             if 'inventory' in dev['commands']:
                 dev['warnings'].append('FEX %s is in show fex but not in show inventory - taken from show fex'
                                        % num)
-        if st.get('state', '').lower() != 'online':
-            dev['warnings'].append('FEX %s state: %s%s' % (num, st.get('state') or '?',
+        if st.get('state') and st['state'].lower() != 'online':
+            dev['warnings'].append('FEX %s state: %s%s' % (num, st['state'],
                                                           '' if serial else ' (not in show inventory)'))
 
     drop_unserialized(dev)
