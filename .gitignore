@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+# your data - never commit real data
+inventory_data/
+netinv_data/
+input/
+outputs/
+# real-output regression fixtures stay local
+tests/fixtures_local/
+*.local.txt
+
+# development-only files: kept locally, not published
+DESIGN.md
+samples/
+tests/*
+!tests/test_local_fixtures.py
+examples/*
+!examples/manual_inventory_template.xlsx
