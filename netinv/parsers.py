@@ -12,7 +12,10 @@ from .textutil import real_serial
 # How IOS / IOS-XE / NX-OS say "I don't do that command" - such sections are skipped.
 INVALID_RE = re.compile(r'^\s*(% ?(Invalid input|Invalid command|Incomplete command|Ambiguous command|'
                         r'.*not enabled|Feature not enabled|.*is not running)|'
-                        r'Syntax error while parsing)', re.M | re.I)
+                        r'Syntax error while parsing|'
+                        # refused by AAA (e.g. another SolarWinds instance's account)
+                        r'(% ?)?(Command authorization failed|Authorization failed|Permission denied))',
+                        re.M | re.I)
 
 
 def is_unsupported(text):
@@ -57,7 +60,7 @@ def parse_version(text):
 
     r['version'] = (_first(r'Cisco IOS[ -]XE Software,?\s+Version\s+(\S+)', text)
                     or _first(r'Cisco IOS Software.*?,\s*Version\s+([^,\s]+)', text))
-    m = re.search(r'^(?!Kernel |System |Uptime |Switch )(\S+)\s+uptime is\s+(.+?)\s*$', text, re.M)
+    m = re.search(r'^(?!Kernel |System |Uptime )(\S+)\s+uptime is\s+(.+?)\s*$', text, re.M)
     if m:
         r['hostname'], r['uptime'] = m.group(1), m.group(2)
     r['image'] = _first(r'System image file is\s+"([^"]+)"', text)

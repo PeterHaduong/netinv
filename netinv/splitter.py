@@ -15,7 +15,7 @@ from, so problems can be diagnosed without anyone sharing the raw text.
 import os
 import re
 
-from .textutil import read_text, looks_binary, is_ipv4, split_caption, IPV4_RE
+from .textutil import read_text, looks_binary, is_ipv4, norm_host, split_caption, IPV4_RE
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 SKIP_EXTS = {'.zip', '.7z', '.gz', '.exe', '.dll', '.xlsx', '.xls', '.docx', '.pdf',
@@ -62,7 +62,7 @@ _NEIGHBOR_VERSION_LEAD = re.compile(r'^\s*(Version|System Description)\s*:\s*$')
 
 _HOST_FROM_VERSION = [
     re.compile(r'^\s*Device name:\s*(\S+)', re.M),
-    re.compile(r'^(?!Kernel |System |Uptime |Switch )(\S+)\s+uptime is\s', re.M),
+    re.compile(r'^(?!Kernel |System |Uptime )(\S+)\s+uptime is\s', re.M),
 ]
 
 _NAME_NOISE = {
@@ -86,7 +86,8 @@ def _drop_separators(text):
 class Section(object):
     """One command's output for one device ('!' separator lines from the script removed)."""
 
-    def __init__(self, path, cmd, text, how, host=None, host_source=None, ip_hint=None, note=''):
+    def __init__(self, path, cmd, text, how, host=None, host_source=None, ip_hint=None, note='',
+                 block=None):
         self.path = path
         self.cmd = cmd                  # 'version', 'inventory', ... or 'unknown' / 'ignored'
         self.text = _drop_separators(text)
@@ -95,6 +96,7 @@ class Section(object):
         self.host_source = host_source  # 'prompt', 'show version', 'file name', 'folder name'
         self.ip_hint = ip_hint
         self.note = note                # SolarWinds caption note: 'campus-as1 (BLDG 2)' -> 'BLDG 2'
+        self.block = block              # which node block of which file it came from
 
     def __repr__(self):
         return 'Section(%s, %s, host=%s via %s)' % (os.path.basename(self.path), self.cmd,
@@ -209,18 +211,41 @@ _PROMPT_PREFIX = re.compile(r'^[A-Za-z0-9][\w.\-]*(?:\([\w\-]+\))?[#>]\s*')
 _RESCUE = ('version', 'inventory', 'module', 'fex', 'vdc', 'neighbors')
 
 
+_OWN_VERSION = re.compile(r'^\S+\s+uptime is\s|^\s*Device name:', re.M)
+
+
 def _by_content(cmd, lines):
-    """[(cmd, start, end)]: the section split wherever another command's output starts (its
-    signature line), so output whose echo was lost - e.g. glued to a '!' or missing - is not
-    swallowed by the command before it."""
-    out, current, start = [], cmd, 0
-    for sig, s, _ in _segment_by_signature(lines):
+    """[(cmd, start, end, rescued)]: the section split wherever another command's output starts
+    (its signature line), so output whose echo was lost - e.g. glued to a '!' or missing - is not
+    swallowed by the command before it. A 'show version' is only cut out when it is a device's
+    own (it has 'uptime is' / 'Device name:'), never a neighbour's banner. rescued = recognised by
+    content, not by its echo: such output loses to an echoed copy of the same command."""
+    segs = _segment_by_signature(lines)
+    out, current, start, rescued = [], cmd, 0, False
+    for n, (sig, s, e) in enumerate(segs):
         if s == 0 or sig == current or sig not in _RESCUE:
             continue
-        out.append((current, start, s))
-        current, start = sig, s
-    out.append((current, start, len(lines)))
+        if sig == 'version' and not _OWN_VERSION.search('\n'.join(lines[s:e])):
+            continue
+        out.append((current, start, s, rescued))
+        current, start, rescued = sig, s, True
+    out.append((current, start, len(lines), rescued))
     return out
+
+
+def _echo(line, host):
+    """The command text when a line is a command echo: bare ('show inventory'), or after this
+    node's own prompt ('RTR1#show inventory'). A prompt naming another device - e.g. text in a
+    banner - is not an echo."""
+    if not _BARE_COMMAND.match(line):
+        return None
+    m = _PROMPT_PREFIX.match(line)
+    if m:
+        prompt = re.split(r'[#>(]', m.group(0))[0]
+        if norm_host(prompt) != norm_host(host or ''):
+            return None
+        return line[m.end():]
+    return line
 
 
 def _split_ncm(path, lines):
@@ -240,28 +265,33 @@ def _split_ncm(path, lines):
     if not blocks:
         return None
     sections = []
-    for b in blocks:
+    for bn, b in enumerate(blocks):
         body = b['lines']
         err = [m.group(1) for m in (_NCM_ERROR.match(l) for l in body) if m]
         if err and not any(_BARE_COMMAND.match(l) for l in body):
             sections.append(Section(path, 'error', err[0], 'ncm', host=b['host'],
-                                    host_source='SolarWinds header', ip_hint=b['ip'], note=b['note']))
+                                    host_source='SolarWinds header', ip_hint=b['ip'], note=b['note'],
+                                    block=(path, bn)))
             continue
-        marks = [(i, match_command(_PROMPT_PREFIX.sub('', l))) for i, l in enumerate(body)
-                 if _BARE_COMMAND.match(l)]
-        if marks:
-            for n, (i, key) in enumerate(marks):
-                end = marks[n + 1][0] if n + 1 < len(marks) else len(body)
-                part = body[i + 1:end]
-                for cmd, s, e in _by_content(key, part):
-                    sections.append(Section(path, cmd, '\n'.join(part[s:e]), 'ncm',
-                                            host=b['host'], host_source='SolarWinds header',
-                                            ip_hint=b['ip'], note=b['note']))
-        else:   # NCM did not echo the commands: recognise each output by its content
-            for cmd, start, end in _segment_by_signature(body):
-                sections.append(Section(path, cmd, '\n'.join(body[start:end]), 'ncm+signature',
+        block = (path, bn)
+        marks = []
+        for i, l in enumerate(body):
+            text = _echo(l, b['host'])
+            if text is not None:
+                marks.append((i, match_command(text)))
+        # Output before the first echo (or all of it, when nothing was echoed): by its content.
+        head = body[:marks[0][0]] if marks else body
+        for cmd, start, end in _segment_by_signature(head):
+            sections.append(Section(path, cmd, '\n'.join(head[start:end]), 'ncm+signature',
+                                    host=b['host'], host_source='SolarWinds header',
+                                    ip_hint=b['ip'], note=b['note'], block=block))
+        for n, (i, key) in enumerate(marks):
+            end = marks[n + 1][0] if n + 1 < len(marks) else len(body)
+            part = body[i + 1:end]
+            for cmd, s, e, rescued in _by_content(key, part):
+                sections.append(Section(path, cmd, '\n'.join(part[s:e]), 'ncm+content' if rescued else 'ncm',
                                         host=b['host'], host_source='SolarWinds header',
-                                        ip_hint=b['ip'], note=b['note']))
+                                        ip_hint=b['ip'], note=b['note'], block=block))
     return sections
 
 
@@ -283,14 +313,16 @@ def split_file(path, root):
         stats['layout'] = 'prompt'
         hosts = set()
         for host, cmd_text, start, end in prompt_segments:
-            key = match_command(cmd_text) if cmd_text else 'unknown'
+            key = match_command(cmd_text) if cmd_text else None
             part = lines[start:end]
-            if not key or not any(l.strip() for l in part):
-                continue
-            hosts.add(host.lower())
-            for cmd, s, e in _by_content(key, part):
-                sections.append(Section(path, cmd, '\n'.join(part[s:e]), 'prompt',
-                                        host=host, host_source='prompt'))
+            if key is None:                 # a bare prompt: keep only output that follows it
+                if not any(l.strip() for l in part):
+                    continue
+                key = 'unknown'
+            hosts.add(host.lower())         # a command with no output still names its device
+            for cmd, s, e, rescued in _by_content(key, part):
+                sections.append(Section(path, cmd, '\n'.join(part[s:e]), 'prompt+content' if rescued else 'prompt',
+                                        host=host, host_source='prompt', block=(path, host.lower())))
         stats['devices_in_file'] = len(hosts)
         return sections, stats
 

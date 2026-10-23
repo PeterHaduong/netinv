@@ -853,9 +853,11 @@ class App(object):
 
         def done(snap):
             self.refresh_networks(select=safe_name(name))
-            self.set_status('Imported %s: %d devices (%d not reached - last known hardware kept), %d issues'
+            self.set_status('Imported %s: %d devices (%d not reached - last known hardware kept; %d listed '
+                            'under two names - counted once, see Issues), %d issues'
                             % (name, sum(1 for d in snap['devices'] if in_inventory(d)),
                                sum(1 for d in snap['devices'] if d.get('stale')),
+                               snap['build_stats'].get('combined', 0),
                                sum(len(d['warnings']) for d in snap['devices'])))
         self._run('Importing %s' % name,
                   lambda: self.ws.import_exports(safe_name(name), path, nodes, progress), done)

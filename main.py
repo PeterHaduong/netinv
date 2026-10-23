@@ -88,9 +88,11 @@ def main(argv=None):
         sys.stdout.write(script_text([c for c, _, _, _ in CATALOG] if args.all else default_commands()))
     elif args.cmd == 'import':
         snap = ws.import_exports(args.network, args.path, args.nodes)
-        print('%s: %d devices (%d not reached, last known hardware kept), %d issues'
+        print('%s: %d devices (%d not reached, last known hardware kept; %d listed under two names, '
+              'counted once - see Issues), %d issues'
               % (args.network, sum(1 for d in snap['devices'] if in_inventory(d)),
                  sum(1 for d in snap['devices'] if d.get('stale')),
+                 snap['build_stats'].get('combined', 0),
                  sum(len(d['warnings']) for d in snap['devices'])))
     elif args.cmd == 'import-manual':
         snaps, info = ws.import_manual(args.sheet, args.network)

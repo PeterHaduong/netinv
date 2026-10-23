@@ -34,8 +34,12 @@ import (a folder, or several files), or import them one after the other into the
 Each device appears once: where two files cover the same node, the newest usable output of each
 command is used, and a node one instance could not reach but the other could shows the good data
 with no error. A node named differently in the two instances (`as1.example.com` vs `as1`, with or
-without a note) is matched by its show version hostname and serial number. Domain names are
-dropped from hostnames.
+without a note, or an IP address as its name) is matched only on hard evidence: the same show
+version hostname plus an overlapping chassis / stack serial number or the same SolarWinds IP
+address; an unreachable node joins only the device with its IP address. Two different boxes are
+never merged, even when they share a hostname or a SolarWinds name. Every match is listed on
+the Issues tab ("Also listed in SolarWinds as ... - counted once"), and the import summary says
+how many there were. Domain names are dropped from hostnames.
 
 ## 2. Manual inventory (isolated networks, bench stock)
 

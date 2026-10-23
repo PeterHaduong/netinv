@@ -49,6 +49,10 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
     if not prev:
         return list(fresh)
     by_key = dict((d['key'], d) for d in fresh)
+    by_ip = {}
+    for d in fresh:
+        if d.get('mgmt_ip'):
+            by_ip.setdefault(d['mgmt_ip'], d)
     owned = {}                                   # serial -> fresh device that has it
     for d in fresh:
         if reached(d):
@@ -61,6 +65,10 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
         if p.get('source', 'SolarWinds') != 'SolarWinds' or not in_inventory(p):
             continue
         cur = by_key.get(p['key'])
+        if cur is not None and _other_box(cur, p):
+            # the caption now names another box (e.g. a second SolarWinds instance lists it
+            # without its note): follow this box by its IP address instead
+            cur = by_ip.get(p.get('mgmt_ip'))
         if cur is not None and reached(cur):
             continue
         last = p.get('last_seen') or _day(prev.get('created'))
@@ -70,13 +78,16 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
             age = 0
         holder = owned.get(p['serial'].split(' / ')[0]) if p['serial'] else None
         if holder is not None and (norm_host(holder['hostname']) == norm_host(p['hostname'])
-                                   or p.get('platform') != 'NX-OS'):
+                                   or (holder.get('mgmt_ip') and holder['mgmt_ip'] == p.get('mgmt_ip'))):
             continue    # the same box, collected now under another name (e.g. another SolarWinds)
         if not p.get('stale') and age <= ROUND_GAP_DAYS:      # collected earlier this round
             old = copy.deepcopy(p)
             old['carried'] = True
             if cur is not None:
                 out.remove(cur)
+                old['key'] = cur['key']
+            elif old['key'] in by_key:           # the caption is taken by another box now
+                old['key'] = _free_key(old['key'], out)
             if holder is not None:
                 old.update(hardware=[], members=[], vdc_of=holder['hostname'])
             out.append(old)
@@ -90,10 +101,30 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
             old['warnings'] += cur['warnings']
             old['mgmt_ip'] = cur['mgmt_ip'] or old['mgmt_ip']
             out.remove(cur)
+            old['key'] = cur['key']
+        elif old['key'] in by_key:
+            old['key'] = _free_key(old['key'], out)
         if holder is not None:                   # e.g. the other VDC of this chassis answered
             old.update(hardware=[], members=[], vdc_of=holder['hostname'])
         out.append(old)
     return out
+
+
+def _other_box(cur, p):
+    """Is the fresh device under p's caption a different box: other IP and no serial in common?"""
+    if not (cur.get('mgmt_ip') and p.get('mgmt_ip')) or cur['mgmt_ip'] == p['mgmt_ip']:
+        return False
+    a = set(s for s in (cur.get('serial') or '').split(' / ') if s)
+    b = set(s for s in (p.get('serial') or '').split(' / ') if s)
+    return not (a & b)
+
+
+def _free_key(key, devices):
+    taken = set(d['key'] for d in devices)
+    n = 2
+    while '%s #%d' % (key, n) in taken:
+        n += 1
+    return '%s #%d' % (key, n)
 
 
 def merge_manual(solarwinds, manual):

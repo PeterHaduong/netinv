@@ -72,18 +72,60 @@ def new_device(key, source='SolarWinds'):
 
 # Output that is not parsed: every copy is kept (only the command names are recorded).
 _UNPARSED = ('unknown', 'ignored', 'neighbors')
+_HW_IDENTITY = ('chassis', 'stack_member')     # parts whose serials identify the box itself
+
+
+class _Parsed(object):
+    """What one section yields, worked out once: quality and the serials it names - 'inv' from
+    show inventory (chassis / stack members), 'ver' from show version (on NX-OS that is the
+    supervisor's, so the two kinds are only compared with their own kind)."""
+    cache = {}
+
+    @classmethod
+    def of(cls, sec):
+        key = id(sec)
+        hit = cls.cache.get(key)
+        if hit is None or hit[0] is not sec:
+            hit = cls.cache[key] = (sec, cls._work(sec))
+        return hit[1]
+
+    @staticmethod
+    def _work(sec):
+        out = {'quality': 0, 'hostname': '', 'inv': set(), 'ver': set()}
+        if sec.cmd == 'error' or not sec.text.strip() or parsers.is_unsupported(sec.text):
+            return out                          # nothing usable: an error, empty or rejected
+        out['quality'] = 1
+        if sec.cmd == 'version':
+            v = parsers.parse_version(sec.text)
+            out['hostname'] = norm_host(v.get('hostname') or '')
+            sn = real_serial(v.get('serial'))
+            if sn:
+                out['ver'].add(sn)
+            if out['hostname'] or sn:
+                out['quality'] = 2              # a real show version (not e.g. a neighbour's banner)
+        elif sec.cmd == 'inventory':
+            items, _ = parsers.parse_inventory(sec.text)
+            if items:
+                out['quality'] = 2
+            for it in items:
+                if it['serial'] and kind_of(it) in _HW_IDENTITY:
+                    out['inv'].add(it['serial'])
+        else:
+            out['quality'] = 2
+        return out
 
 
 def _usable(sec):
     """Output that can be parsed: not a collection error, not empty, not rejected."""
-    return (sec.cmd != 'error' and bool(sec.text.strip())
-            and not (sec.cmd != 'version' and parsers.is_unsupported(sec.text)))
+    return _Parsed.of(sec)['quality'] > 0
 
 
 def _pick_sections(secs):
     """One section per command for a device. Several collections may cover the same device
-    (e.g. two SolarWinds jobs that overlap): use the usable output from the newest file, and drop
-    a 'could not collect' error when another file did reach the device."""
+    (e.g. two SolarWinds instances that overlap). Best first: output that parses (a show version
+    with a hostname or serial, an inventory with entries), then output that followed the command's
+    own echo (not just recognised by its content), then the newest file. A 'could not collect'
+    error is dropped when another collection did reach the device."""
     mtimes = {}
 
     def mtime(path):
@@ -103,57 +145,169 @@ def _pick_sections(secs):
     for cmd, cands in by_cmd.items():
         if cmd == 'error' and reached:
             continue
-        keep.append(max(cands, key=lambda c: (_usable(c[1]), mtime(c[1].path), c[0])))
+        keep.append(max(cands, key=lambda c: (_Parsed.of(c[1])['quality'],
+                                              not (c[1].how or '').endswith('+content'),
+                                              mtime(c[1].path), c[0])))
     return [s for _, s in sorted(keep, key=lambda c: c[0])]
 
 
-def _merge_same_device(groups):
-    """Join groups that are one box under two names - e.g. 'as1.example.com' in one collection and
-    a file named by IP in another: same show version hostname and the same serial (or one has
-    none). Different serials or different SolarWinds notes stay apart (same name, two devices)."""
-    info = {}
-    for key, secs in groups.items():
-        vers = [s for s in secs if s.cmd == 'version' and _usable(s)]
-        if not vers:
-            continue
-        v = parsers.parse_version(vers[-1].text)
-        if v.get('hostname'):
-            info[key] = (norm_host(v['hostname']), real_serial(v.get('serial')),
-                         next((s.note for s in secs if s.note), ''))
-    owner = dict((k, k) for k in groups)
+def _different_boxes(a, b):
+    """Do the serials prove two different boxes? Chassis / stack serials from show inventory are
+    compared with each other; show version serials only when an inventory is missing on a side,
+    and a show version serial that appears in the other side's inventory is the same box."""
+    if a['inv'] and b['inv']:
+        return not (a['inv'] & b['inv'])
+    if a['ver'] and b['ver']:
+        return not ((a['ver'] | a['inv']) & (b['ver'] | b['inv']))
+    return False
 
-    def find(k):
-        while owner[k] != k:
-            k = owner[k]
-        return k
-    keys = [k for k in groups if k in info]
-    for a_i, a in enumerate(keys):
-        for b in keys[a_i + 1:]:
-            (ha, sa, na), (hb, sb, nb) = info[a], info[b]
-            # same serial = same box, whatever the notes; without both serials, notes must agree
-            if ha == hb and ((sa and sa == sb) or
-                             ((not sa or not sb) and (not na or not nb or na == nb) and (sa or sb or na == nb))):
-                ra, rb = find(a), find(b)
-                if ra != rb:
-                    best = min((ra, rb), key=lambda k: (not ' | ' in k, is_ipv4(k) or k.startswith('unidentified:'),
-                                                        list(groups).index(k)))
-                    owner[ra] = owner[rb] = best
-    # A record with no output of its own (e.g. 'could not collect' in one instance) joins the one
-    # collected device of the same hostname - if there is exactly one, so the match is certain.
-    by_host = {}
-    for k, (h, _, _) in info.items():
-        by_host.setdefault(h, set()).add(find(k))
-    for k, secs in groups.items():
-        if k in info or k.startswith('unidentified:'):
+
+def _caption(sec):
+    """How SolarWinds (or the file) names the node: 'as1', 'as1 (BLDG 2)', '10.1.1.1'."""
+    host = short_host(sec.host or '')
+    return '%s (%s)' % (host, sec.note) if sec.note else host
+
+
+def _group_sections(sections, stats):
+    """Sections -> {device key: [sections]}: one device per physical box.
+
+    Each SolarWinds block (one node in one results file) is a unit. Blocks join when the evidence
+    says they are the same box, never on a name alone:
+      * same caption (device key) - unless their serial numbers show two different boxes
+        (one instance listing another box under that caption);
+      * different captions, same show version hostname and an overlapping chassis / stack
+        serial, or the same SolarWinds IP address (the same box named differently in two
+        SolarWinds instances, e.g. 'as1' / 'as1 (BLDG 2)' / '10.1.1.1');
+      * a block with no usable output (e.g. 'could not collect') joins the one device with the
+        same IP address.
+    Returns ({key: [sections]}, {key: note}): every join across captions gets a note for the
+    device's issues, so nothing is merged silently."""
+    blocks, order = {}, []
+    for sec in sections:
+        stats['sections'][sec.cmd] = stats['sections'].get(sec.cmd, 0) + 1
+        if not sec.host:
+            stats['unidentified_sections'] += 1
+            key = 'unidentified:' + sec.path
+        else:
+            key = device_key(sec.host, sec.note)
+        bid = (key, getattr(sec, 'block', None) or (sec.path,))
+        if bid not in blocks:
+            blocks[bid] = {'key': key, 'secs': [], 'ips': set(), 'inv': set(), 'ver': set(), 'host': '',
+                           'data': False, 'caption': _caption(sec) if sec.host else key}
+            order.append(bid)
+        b = blocks[bid]
+        b['secs'].append(sec)
+        if sec.ip_hint:
+            b['ips'].add(sec.ip_hint)
+        p = _Parsed.of(sec)
+        b['inv'] |= p['inv']
+        b['ver'] |= p['ver']
+        if sec.cmd in ('version', 'inventory') and p['quality'] > 0:
+            b['data'] = True
+        if p['hostname'] and (not b['host'] or p['quality'] == 2):
+            b['host'] = p['hostname']
+
+    owner = dict((bid, bid) for bid in order)
+    comp = dict((bid, {'inv': set(blocks[bid]['inv']), 'ver': set(blocks[bid]['ver']), 'ips': set(blocks[bid]['ips']),
+                       'hosts': set([blocks[bid]['host']]) - set([''])}) for bid in order)
+    why = {}
+
+    def find(x):
+        while owner[x] != x:
+            owner[x] = owner[owner[x]]
+            x = owner[x]
+        return x
+
+    def join(a, b, reason=None):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return True
+        ca, cb = comp[ra], comp[rb]
+        if _different_boxes(ca, cb):
+            return False                        # two different boxes: never one device
+        owner[rb] = ra
+        ca['inv'] |= cb['inv']
+        ca['ver'] |= cb['ver']
+        ca['ips'] |= cb['ips']
+        ca['hosts'] |= cb['hosts']
+        if reason:
+            why.setdefault(ra, set()).add(reason)
+        why.setdefault(ra, set()).update(why.pop(rb, set()))
+        return True
+
+    # 1. The same caption: one device, unless the serials say otherwise.
+    by_key = {}
+    for bid in order:
+        by_key.setdefault(blocks[bid]['key'], []).append(bid)
+    for key, bids in by_key.items():
+        with_ev = [b for b in bids if blocks[b]['inv'] or blocks[b]['ver']]
+        without = [b for b in bids if not (blocks[b]['inv'] or blocks[b]['ver'])]
+        for b in with_ev[1:]:
+            for a in with_ev:
+                if a != b and join(a, b):
+                    break
+        for b in without:                       # no serials: join the caption's device with the
+            ips = blocks[b]['ips']              # same IP (or, without IPs, its first one)
+            targets = [a for a in with_ev if not ips or not blocks[a]['ips'] or blocks[a]['ips'] & ips]
+            if targets:
+                join(targets[0], b)
+            else:
+                others = [a for a in without if a != b and (not ips or not blocks[a]['ips']
+                                                             or blocks[a]['ips'] & ips)]
+                if others and others[0] != b:
+                    join(others[0], b)
+    # 2. Different captions, same box: same show version hostname plus a serial or IP in common.
+    roots = sorted(set(find(b) for b in order), key=order.index)
+    for i, a in enumerate(roots):
+        for b in roots[i + 1:]:
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                continue
+            ca, cb = comp[ra], comp[rb]
+            if not (ca['hosts'] & cb['hosts']):
+                continue
+            if (ca['inv'] | ca['ver']) & (cb['inv'] | cb['ver']):
+                join(ra, rb, 'same serial number')
+            elif ca['ips'] & cb['ips']:
+                join(ra, rb, 'same IP address and hostname')
+    # 3. A node with no usable output anywhere joins the one device with its IP address.
+    for bid in order:
+        r = find(bid)
+        if any(blocks[x]['data'] for x in order if find(x) == r):
             continue
-        host, _, note = k.partition(' | ')
-        cands = [c for c in by_host.get(host, ()) if not note or info.get(c, ('', '', ''))[2].lower() in ('', note)]
+        cands = set(find(x) for x in order if find(x) != r and blocks[x]['data']
+                    and blocks[x]['ips'] & comp[r]['ips'])
         if len(cands) == 1:
-            owner[k] = cands[0]
-    merged = {}
-    for k in groups:
-        merged.setdefault(find(k), []).extend(groups[k])
-    return merged
+            join(cands.pop(), r, 'same IP address; not reached under that name')
+
+    groups, captions = {}, {}
+    for bid in order:
+        r = find(bid)
+        groups.setdefault(r, []).extend(blocks[bid]['secs'])
+        captions.setdefault(r, [])
+        if blocks[bid]['caption'] not in captions[r]:
+            captions[r].append(blocks[bid]['caption'])
+    out, notes, used = {}, {}, set()
+    for r, secs in groups.items():
+        keys = []
+        for x in order:
+            if find(x) == r and blocks[x]['key'] not in keys:
+                keys.append(blocks[x]['key'])
+        key = min(keys, key=lambda k: (' | ' not in k, is_ipv4(k) or k.startswith('unidentified:'),
+                                       keys.index(k)))
+        n = 2
+        base = key
+        while key in used:                      # one caption, two boxes: keep both
+            key = '%s #%d' % (base, n)
+            n += 1
+        used.add(key)
+        out[key] = secs
+        others = [c for c in captions[r] if device_key(*split_caption(c)) != base]
+        if others and why.get(r):
+            stats['combined'] = stats.get('combined', 0) + len(others)
+            notes[key] = ('Also listed in SolarWinds as %s - counted once (%s)'
+                          % (', '.join(others), ', '.join(sorted(why[r]))))
+    return out, notes
 
 
 def build_devices(sections, nodes=None):
@@ -162,20 +316,14 @@ def build_devices(sections, nodes=None):
     nodes = nodes or {}
     stats = {'sections': {}, 'unsupported': {}, 'inventory_name_lines': 0, 'inventory_items': 0,
              'kinds': {}, 'unrecognised': {}, 'version_missing_lines': [], 'module_unparsed': 0,
-             'unidentified_sections': 0, 'vdc_groups': 0, 'no_serial': {}, 'overlapping_devices': 0}
-    groups = {}
-    for sec in sections:
-        stats['sections'][sec.cmd] = stats['sections'].get(sec.cmd, 0) + 1
-        if not sec.host:
-            stats['unidentified_sections'] += 1
-            key = 'unidentified:' + sec.path
-        else:
-            key = device_key(sec.host, sec.note)
-        groups.setdefault(key, []).append(sec)
-    groups = _merge_same_device(groups)
+             'unidentified_sections': 0, 'vdc_groups': 0, 'no_serial': {}, 'overlapping_devices': 0,
+             'combined': 0}
+    groups, notes = _group_sections(sections, stats)
     devices = {}
     for key, secs in groups.items():
         dev = devices[key] = new_device(key)
+        if key in notes:
+            dev['warnings'].append(notes[key])
         for sec in secs:
             dev['note'] = dev['note'] or sec.note
             dev['files'].add(sec.path)
@@ -189,6 +337,7 @@ def build_devices(sections, nodes=None):
         for sec in _pick_sections(secs):
             _apply_section(dev, sec, stats)
     _finish_all(devices, nodes, stats)
+    _Parsed.cache.clear()
     return sorted(devices.values(), key=lambda d: (d['site'], d['hostname'] or d['key'])), stats
 
 
@@ -197,7 +346,7 @@ def _apply_section(dev, sec, stats):
         dev['warnings'].append('SolarWinds could not collect: ' + sec.text)
         dev['commands'].add('collection error')
         return
-    if parsers.is_unsupported(sec.text) and sec.cmd != 'version':
+    if parsers.is_unsupported(sec.text):
         stats['unsupported'][sec.cmd] = stats['unsupported'].get(sec.cmd, 0) + 1
         dev['commands'].add(sec.cmd + ' (not supported)')
         dev.setdefault('_rejected', {})[sec.cmd] = parsers.unsupported_reason(sec.text)
@@ -366,9 +515,11 @@ def _finish_device(dev, nodes):
 def drop_unserialized(dev):
     """Keep only hardware with a real serial number; set the device's model, serial and stack
     members from what is left. Safe to run again (e.g. on a snapshot from an older version)."""
-    keep, gone, seen = [], [], set()
+    keep, gone, seen, builtin = [], [], set(), []
     for it in dev['hardware']:
         if it['kind'] == 'builtin':        # part of the chassis (N9K 'Slot 1', a FEX's own module)
+            if real_serial(it.get('serial')):
+                builtin.append(it)
             continue
         it['serial'] = real_serial(it.get('serial'))
         if not it['serial']:
@@ -394,6 +545,11 @@ def drop_unserialized(dev):
         dev['model'] = ', '.join(pids) + (' (stack of %d)' % len(members) if len(members) > 1 else '')
         active = [m for m in members if m['role'] == 'active'] or members
         dev['serial'] = active[0]['serial']
+    elif not dev.get('serial') and builtin:
+        # no chassis serial anywhere else (e.g. a router whose 'Chassis' line has none): the
+        # serial of a part built into the chassis identifies the box
+        dev['model'] = dev.get('model') or builtin[0]['pid']
+        dev['serial'] = real_serial(builtin[0]['serial'])
     return gone
 
 
