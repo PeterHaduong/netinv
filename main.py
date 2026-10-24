@@ -15,6 +15,8 @@ Command line (for scripting or a PC without a GUI):
     python main.py manual-sheet OUT.xlsx [NETWORK ...]     blank manual sheet, or those networks' rows
     python main.py forget NETWORK HOSTNAME ...             drop devices that are gone for good
     python main.py exclude NETWORK [PATTERN ...] [--remove]  hide devices (e.g. another team's)
+    python main.py shared-serial [SERIAL ...] [--remove]   serials known to be factory defaults
+                                                           shared by different parts
     python main.py list                                    networks in the workspace (in order)
     python main.py workbook OUT.xlsx [NETWORK ...] [--excluded]   Excel workbook (default: all);
                                                            --excluded: only the excluded devices
@@ -67,6 +69,9 @@ def main(argv=None):
     p.add_argument('network')
     p.add_argument('patterns', nargs='*')
     p.add_argument('--remove', action='store_true')
+    p = sub.add_parser('shared-serial', help='show / add / remove acknowledged shared (default) serials')
+    p.add_argument('serials', nargs='*')
+    p.add_argument('--remove', action='store_true')
     sub.add_parser('list')
     p = sub.add_parser('workbook')
     p.add_argument('out')
@@ -118,6 +123,18 @@ def main(argv=None):
         print('Rules: %s' % (', '.join(ws.exclusions(args.network)) or 'none'))
         for d in snap.get('excluded', []):
             print('  excluded  %-30s by %s' % (display_name(d), d['excluded_by']))
+    elif args.cmd == 'shared-serial':
+        serials = ws.shared_serials()
+        if args.serials:
+            serials = ([s for s in serials if s not in args.serials] if args.remove
+                       else serials + args.serials)
+            ws.set_shared_serials(serials)
+        print('Shared serials: %s' % (', '.join(ws.shared_serials()) or 'none'))
+        for n in ws.networks():
+            for d in ws.load(n)['devices']:
+                for it in d['hardware']:
+                    if it.get('shared_serial'):
+                        print('  %-14s %-20s %-24s %s' % (it['serial'], n, display_name(d), it['name']))
     elif args.cmd == 'list':
         for n in ws.networks():
             s = ws.load(n)
@@ -133,7 +150,8 @@ def main(argv=None):
         else:
             write_xlsx(args.out, workbook_for_networks(
                 [(n, snaps[n]['devices']) for n in nets],
-                about=about_sheet([(n, snaps[n]) for n in nets], ws.include_optics())))
+                about=about_sheet([(n, snaps[n]) for n in nets], ws.include_optics(),
+                                  shared_serials=ws.shared_serials())))
         print('Wrote', args.out)
     return 0
 

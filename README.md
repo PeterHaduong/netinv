@@ -12,7 +12,7 @@ Python standard library only, Python 3.6+. Fixing parsers against real output:
 | `main.py` | The app: double-click it. |
 | `netinv/` | The program code. Nothing to change here to use the app. |
 | `input/` | Put SolarWinds results and manual inventory sheets here; the app's file pickers open in it. |
-| `inventory_data/` | Created by the app: every import (snapshots), your settings (ticked networks, order, exclusion rules) and `outputs/` (workbooks). **Back it up** - it is your history. |
+| `inventory_data/` | Created by the app: every import (snapshots), your settings (ticked networks, order, exclusion rules, shared serials) and `outputs/` (workbooks). **Back it up** - it is your history. |
 | `tools/`, `tests/`, `REFINING.md` | Only for fixing parsers against real output. |
 
 `input/` and `inventory_data/` hold real data and are never committed to git. (A data folder
@@ -136,6 +136,12 @@ times as needed), and import the manual sheet. Imports less than 30 days apart a
   Nexus 7700 shared by several VDCs counts as one. Built-in parts (a chassis' own route
   processor or front-panel ports) are not counted, nor are devices left out by exclusion rules
   (their parts are counted in the separate excluded-devices workbook).
+* **Default serials.** A module, PSU or fan in two different devices reporting the same serial
+  (a factory default) is two parts, counted separately; Issues names the part on each device.
+  Once checked, select the part (or the device) and click **Mark serial as shared/default**:
+  the issue goes away and the serial is listed on the workbook's About sheet. Click again to
+  unmark. A chassis or stack member is never marked - a repeated chassis serial stays an issue.
+  (Command line: `python main.py shared-serial FOC0000X`, `--remove`.)
 
 ## Sanitized summary
 

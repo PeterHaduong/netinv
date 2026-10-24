@@ -648,19 +648,59 @@ def _merge_module_status(dev):
             it['role'] = (row.get('role', '') or it['role']).lower()
 
 
+_BOX_KINDS = ('chassis', 'stack_member', 'fex')
+
+
+def part_identity(dev, it):
+    """What makes a part one physical part, for counting. A chassis, stack member or FEX is its
+    serial (a dual-homed FEX under two parents, a chassis shared by VDCs: one part). Any other
+    part is its serial within its box: two modules / PSUs in different boxes that report the
+    same serial (a default or placeholder serial) are two parts. Parts inside a FEX belong to
+    the FEX, whichever parent lists them."""
+    if it['kind'] in _BOX_KINDS or it.get('member', '')[:3] == 'FEX':
+        return it['serial']
+    return (it['serial'], dev.get('serial') or dev['key'])
+
+
+def mark_shared_serials(devices, serials):
+    """Apply the acknowledged shared / default serials (settings 'shared_serials'): a module, PSU
+    or fan reporting one is marked shared_serial (still counted once per box, see part_identity)
+    and the 'default serial shared by two parts' warnings for it are dropped. A chassis or stack member
+    with such a serial is not marked - that warning stays, it is a different problem."""
+    serials = set(serials or ())
+    if not serials:
+        return
+    for d in devices:
+        for it in d['hardware']:
+            if it['serial'] in serials and it['kind'] not in _BOX_KINDS:
+                it['shared_serial'] = True
+        d['warnings'] = [w for w in d['warnings'] if (SHARED_WARNING.match(w) or [0, None])[1] not in serials]
+
+
+SHARED_WARNING = re.compile(r'Serial (\S+) on .* default serial shared by two parts')
+
+
 def check_duplicate_serials(devices):
-    """Same serial on two devices is suspicious - except dual-homed FEX (one FEX, two parents)."""
+    """The same serial on two devices: name the part on each side. On a chassis or stack member
+    that is suspicious; on a module, PSU or fan it is usually a default serial shared by two
+    different parts, which are counted separately. A dual-homed FEX is expected and not listed."""
     seen = {}
     for dev in devices.values():
         for it in dev['hardware']:
             if it['kind'] not in ('builtin', 'fex') and it['member'][:3] != 'FEX':
-                seen.setdefault(it['serial'], set()).add(dev['hostname'])
-    for sn, hosts in seen.items():
-        if len(hosts) > 1:
-            for dev in devices.values():
-                if dev['hostname'] in hosts:
-                    dev['warnings'].append('Serial %s also appears on %s'
-                                           % (sn, ', '.join(sorted(hosts - {dev['hostname']}))))
+                seen.setdefault(it['serial'], []).append((dev, it))
+    for sn, uses in seen.items():
+        hosts = set(display_name(d) for d, _ in uses)
+        if len(hosts) < 2:
+            continue
+        for dev, it in uses:
+            others = ', '.join(sorted(hosts - {display_name(dev)}))
+            if it['kind'] in _BOX_KINDS:
+                dev['warnings'].append('Serial %s (%s %s) also appears on %s' % (sn, it['name'], it['pid'], others))
+            else:
+                dev['warnings'].append('Serial %s on %s %s is also reported by a part in %s - probably a '
+                                       'default serial shared by two parts; counted separately'
+                                       % (sn, it['name'], it['pid'], others))
 
 
 # --------------------------------------------------------------------------- part counts
@@ -668,8 +708,9 @@ def check_duplicate_serials(devices):
 def part_counts(networks):
     """Unique part numbers and how many of each there are, per network and in total.
 
-    networks: [(name, devices)]. Each physical part is counted once, by serial number, so a
-    dual-homed FEX (listed under both parents) or a chassis shared by VDCs counts as one.
+    networks: [(name, devices)]. Each physical part is counted once (part_identity): a
+    dual-homed FEX (listed under both parents) or a chassis shared by VDCs counts as one, while
+    two modules in different boxes that report the same default serial count as two.
     Built-in parts (the chassis' own ports / route processor) are not counted separately.
     Returns rows sorted by kind then PID:
         [{'pid', 'kind', 'descr', 'counts': {network: n}, 'total': n}]"""
@@ -684,10 +725,11 @@ def part_counts(networks):
                         r = rows.setdefault(pid, {'pid': pid, 'kind': it['kind'], 'descr': it['descr'],
                                                   'serials': {}, 'all': set()})
                         r['descr'] = r['descr'] or it['descr']
-                        yield name, it, r
-    for name, it, r in parts(networks):
-        r['serials'].setdefault(name, set()).add(it['serial'])
-        r['all'].add(it['serial'])
+                        yield name, d, it, r
+    for name, d, it, r in parts(networks):
+        ident = part_identity(d, it)
+        r['serials'].setdefault(name, set()).add(ident)
+        r['all'].add(ident)
     out = []
     for r in rows.values():
         out.append({'pid': r['pid'], 'kind': r['kind'], 'descr': r['descr'],

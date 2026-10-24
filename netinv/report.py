@@ -6,7 +6,7 @@ import re
 
 from .kinds import KIND_LABELS, KIND_ORDER, MODULE_KINDS
 from .history import seen_text
-from .model import display_name, in_inventory, part_counts
+from .model import display_name, in_inventory, part_counts, part_identity
 from .roles import role_label
 from . import VERSION
 
@@ -125,17 +125,28 @@ def serial_sheet(networks):
             for it in d['hardware']:
                 if not it['serial']:
                     continue
-                r = seen.setdefault(it['serial'], {'it': it, 'nets': [], 'devs': []})
+                r = seen.setdefault(it['serial'], {'it': it, 'nets': [], 'devs': [], 'parts': set(), 'ack': False})
+                r['ack'] = r['ack'] or bool(it.get('shared_serial'))
                 if name not in r['nets']:
                     r['nets'].append(name)
                 if display_name(d) not in r['devs']:
                     r['devs'].append(display_name(d))
+                r['parts'].add(part_identity(d, it))
     rows = [[sn, r['it']['pid'], KIND_LABELS.get(r['it']['kind'], r['it']['kind']), r['it']['descr'],
-             ', '.join(r['nets']), ', '.join(r['devs']), len(r['devs'])]
+             ', '.join(r['nets']), ', '.join(r['devs']), len(r['devs']),
+             _serial_note(r)]
             for sn, r in sorted(seen.items(), key=lambda kv: (order.get(kv[1]['it']['kind'], 99),
                                                               kv[1]['it']['pid'], kv[0]))]
-    return ('Serial numbers', ['Serial', 'PID', 'Kind', 'Description', 'Network', 'Device', 'Devices'],
+    return ('Serial numbers', ['Serial', 'PID', 'Kind', 'Description', 'Network', 'Device', 'Devices', 'Note'],
             rows, {'table': 'SerialNumbers', 'wrap': {3: 40, 5: 50}})
+
+
+def _serial_note(r):
+    if r['ack']:
+        return 'Shared / default serial (acknowledged): %d parts' % len(r['parts'])
+    if len(r['parts']) > 1:
+        return 'Same serial on %d different parts (default serial?)' % len(r['parts'])
+    return ''
 
 
 def part_count_sheet(networks):
@@ -166,9 +177,10 @@ def excluded_note(networks):
     return 'Not counted: %s, left out by exclusion rules.' % joined
 
 
-def about_sheet(snaps, include_optics=False, generated=None):
+def about_sheet(snaps, include_optics=False, generated=None, shared_serials=None):
     """The 'About' sheet that opens the inventory workbook: what it covers and how parts are
-    counted, so a reader does not have to guess. snaps: [(network, snapshot as loaded)]."""
+    counted, so a reader does not have to guess. snaps: [(network, snapshot as loaded)];
+    shared_serials: the acknowledged shared / default serials."""
     generated = generated or datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     rows = [['Generated', '%s (NetInv %s)' % (generated, VERSION)]]
     for name, snap in snaps:
@@ -186,6 +198,10 @@ def about_sheet(snaps, include_optics=False, generated=None):
         ['Optics', 'Optics (SFPs) are included.' if include_optics else
                    'Optics (SFPs) are not listed or counted.'],
     ]
+    if shared_serials:
+        rows.append(['Shared serials', 'These serial numbers are factory default serials reported by '
+                     'different parts, so each part reporting one is counted separately: %s.'
+                     % ', '.join(sorted(shared_serials))])
     stale = [(name, d) for name, snap in snaps for d in snap['devices'] if d.get('stale')]
     if stale:
         rows.append(['Not reached', '%d device%s could not be reached by SolarWinds this round; the '
@@ -231,7 +247,8 @@ def workbook_for_networks(networks, changes=None, baselines=None, about=None):
                                 KIND_LABELS.get(it['kind'], it['kind']), it['name'], it['descr'],
                                 it['pid'], it['vid'], it['serial'], it['status'], it['role'], it['sw'],
                                 it.get('first_seen', ''), it.get('last_seen', ''), seen_text(it),
-                                it.get('notes', '')])
+                                '; '.join(x for x in (it.get('notes', ''), 'Shared / default serial (acknowledged)'
+                                                      if it.get('shared_serial') else '') if x)])
     sheets += [
         ('Devices', ['Network', 'Site', 'Hostname', 'Role', 'Kind', 'Source', 'Last reached',
                      'Mgmt IP', 'Platform', 'Model',

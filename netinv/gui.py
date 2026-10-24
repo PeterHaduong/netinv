@@ -30,7 +30,7 @@ from . import VERSION
 from .commands import CATALOG, script_text
 from .history import DEFAULT_KEEP_DAYS
 from .manual import template_sheets
-from .model import display_name, excluded_by, in_inventory, part_counts
+from .model import SHARED_WARNING, display_name, excluded_by, in_inventory, part_counts
 from .report import (workbook_for_networks, excluded_workbook, about_sheet, excluded_note,
                      device_kind, device_parts, feasibility_report)
 from .kinds import KIND_LABELS
@@ -371,6 +371,9 @@ class App(object):
         self.excl_button.pack(side='left', padx=(6, 2))
         ttk.Button(acts, text='Forget (gone for good)...', command=self.do_forget).pack(side='left', padx=2)
         ttk.Button(acts, text='Exclusion rules...', command=self.do_exclusion_rules).pack(side='left', padx=(12, 2))
+        self.shared_button = ttk.Button(acts, text='Mark serial as shared/default', width=30,
+                                        command=self.do_shared_serial)
+        self.shared_button.pack(side='left', padx=(12, 2))
         cols = ('kind', 'model', 'serial', 'uplink', 'software', 'status', 'ip', 'location', 'notes')
         heads = ('Kind', 'Model / PID', 'Serial', 'Uplink module', 'Software', 'Status / role',
                  'Mgmt IP', 'SNMP location', 'Notes')
@@ -741,6 +744,8 @@ class App(object):
                 note = it.get('notes') or it['descr']
                 if it.get('gaps'):
                     note += ' (came back %dx)' % it['gaps']
+                if it.get('shared_serial'):
+                    note += ' (shared / default serial, acknowledged)'
                 out.append((unit, (kind, it['pid'], it['serial'], '', it['sw'],
                                    ' / '.join(x for x in (it['status'], it['role']) if x), '',
                                    it.get('location', ''), note)))
@@ -933,6 +938,47 @@ class App(object):
         picked = self._picked_devices()
         include = bool(picked) and all(d.get('excluded_by') for _, d in picked)
         self.excl_button.config(text='Include selected device' if include else 'Exclude selected device')
+        serials = self._picked_serials()
+        unmark = bool(serials) and set(serials) <= set(self.ws.shared_serials())
+        self.shared_button.config(text='Unmark shared serial' if unmark else 'Mark serial as shared/default')
+
+    def _picked_serials(self):
+        """Serials of the selected part rows; a selected device row gives the serials its
+        'default serial shared by two parts' issues name."""
+        out = []
+        for iid in self.tree.selection():
+            net, d = self.inv_nodes.get(iid, (None, None))
+            if d is None:
+                continue
+            if iid in self.dev_rows:
+                found = [m.group(1) for m in (SHARED_WARNING.match(w) for w in d['warnings']) if m]
+            else:
+                found = [self.tree.set(iid, 'serial')]
+            out += [s for s in found if s and s not in out]
+        return out
+
+    def do_shared_serial(self):
+        """Acknowledge the selected parts' serials as a factory default shared by different parts
+        (or take the acknowledgement back): no more issue, each part counted separately."""
+        serials = self._picked_serials()
+        if not serials:
+            messagebox.showinfo('Shared serial', 'Select the part (or a device whose Notes say "default '
+                                'serial shared by two parts") on the Inventory tab first.')
+            return
+        known = self.ws.shared_serials()
+        if set(serials) <= set(known):
+            self.ws.set_shared_serials([s for s in known if s not in serials])
+            self.refresh_networks()
+            self.set_status('No longer treated as shared: %s' % _some(serials))
+            return
+        if not messagebox.askyesno('Shared serial', 'Treat %s as a factory default serial shared by '
+                                   'different parts?\n\nThe duplicate-serial issue goes away and every '
+                                   'module / PSU / fan reporting it is counted as its own part. It is '
+                                   'listed on the workbook\'s About sheet.' % ', '.join(serials)):
+            return
+        self.ws.set_shared_serials(known + serials)
+        self.refresh_networks()
+        self.set_status('Shared / default serial: %s  - select it again to unmark' % _some(serials))
 
     def do_exclude_selected(self):
         """Exclude the selected devices - or, for devices in an 'Excluded' branch, bring them back."""
@@ -1020,7 +1066,8 @@ class App(object):
             return
         path = os.path.join(self._outdir(), 'inventory_%s.xlsx' % ('_'.join(nets) if len(nets) <= 3 else 'all'))
         data = [(n, self.snaps[n]['devices']) for n in nets]
-        about = about_sheet([(n, self.snaps[n]) for n in nets], self.ws.include_optics())
+        about = about_sheet([(n, self.snaps[n]) for n in nets], self.ws.include_optics(),
+                            shared_serials=self.ws.shared_serials())
         compared = self._changes_for(nets)
         changes = dict((n, rows) for n, (_, rows) in compared.items())
         baselines = dict((n, since) for n, (since, _) in compared.items())

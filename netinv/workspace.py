@@ -12,11 +12,13 @@ state; older ones are kept so changes between imports can be listed.
 
     <workspace>/settings.json    {"keep_unreached_days": null, "include_optics": false,
                                   "network_order": [...], "checked_networks": [...],
-                                  "exclude": {"NETWORK": ["PS-*", ...]}}
+                                  "exclude": {"NETWORK": ["PS-*", ...]},
+                                  "shared_serials": ["FOC00000000X", ...]}
 
 Exclusion rules hide devices (e.g. another team's equipment on a shared SolarWinds) from
 everything shown and written. They are applied when a snapshot is loaded, so the devices are
 still imported and tracked, and removing a rule brings them back without a re-import.
+Shared serials (factory default serials reported by different modules) are applied the same way.
 
 The inventory is taken about once a year, often as a first SolarWinds job plus retries for the
 devices that failed. Changes therefore compare with the previous round - the newest snapshot
@@ -33,7 +35,7 @@ import shutil
 from . import VERSION
 from .splitter import split_inputs
 from .model import (build_devices, display_name, drop_unserialized, excluded_by, hide_optics,
-                    include_rules, load_node_list)
+                    include_rules, load_node_list, mark_shared_serials)
 from .history import DEFAULT_KEEP_DAYS, ROUND_GAP_DAYS, annotate, carry_forward, merge_manual, update_history
 from .manual import manual_stats, read_manual
 
@@ -123,6 +125,17 @@ class Workspace(object):
             rules.pop(network, None)
         self._update_settings(exclude=rules)
 
+    def shared_serials(self):
+        """Serials acknowledged as shared by different parts (a factory default serial)."""
+        return list(self.settings().get('shared_serials') or [])
+
+    def set_shared_serials(self, serials):
+        clean = []
+        for s in serials:
+            if s.strip() and s.strip() not in clean:
+                clean.append(s.strip())
+        self._update_settings(shared_serials=sorted(clean))
+
     def snapshots(self, network):
         folder = os.path.join(self.net_dir, safe_name(network))
         if not os.path.isdir(folder):
@@ -149,6 +162,7 @@ class Workspace(object):
     def _view(self, network, snap, optics=None):
         if not (self.include_optics() if optics is None else optics):
             hide_optics(snap['devices'])
+        mark_shared_serials(snap['devices'], self.shared_serials())
         rules = self.exclusions(network)
         keep, out = [], []
         for d in snap['devices']:
