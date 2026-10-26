@@ -25,7 +25,7 @@ INVENTORY_HEADER = ['Device', 'Unit', 'Kind', 'Model / PID', 'Serial', 'Uplink m
                     'Uplink module serial', 'Description', 'Software', 'Status / role', 'Mgmt IP',
                     'Site', 'SNMP location', 'Platform', 'Uptime', 'Notes']
 PART_KINDS = ('supervisor', 'linecard', 'fabric', 'sysctrl', 'module', 'fex', 'power', 'fan',
-              'transceiver', 'other')
+              'transceiver', 'builtin', 'other')
 _DEVICE_FILL = 'DDEBF7'
 _STALE_FILL = 'E7E6E6'
 
@@ -194,7 +194,7 @@ def about_sheet(snaps, include_optics=False, generated=None, shared_serials=None
                             'are left out and listed on the Issues sheet.'],
         ['Counted once', 'Part counts count each serial number once: a FEX attached to two switches, '
                          'or a Nexus 7700 split into VDCs, is one part. Parts built into a chassis '
-                         'are not counted separately.'],
+                         '(Kind: Built-in) are listed but not counted separately.'],
         ['Optics', 'Optics (SFPs) are included.' if include_optics else
                    'Optics (SFPs) are not listed or counted.'],
     ]

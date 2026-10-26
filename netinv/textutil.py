@@ -60,6 +60,7 @@ def short_host(name):
     return name if is_ipv4(name) else name.split('.')[0]
 
 
+_IPV6 = re.compile(r'^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}$')
 _CAPTION = re.compile(r'^\s*([A-Za-z0-9][\w.\-]*)\s*(.*?)\s*$')
 
 
@@ -67,6 +68,8 @@ def split_caption(caption):
     """A SolarWinds node caption -> (hostname, note). Ambiguous hostnames get a note in
     SolarWinds: 'campus-as1 (BLDG 2)', 'campus-as1 [BLDG 2]', 'campus-as1 - BLDG 2' ->
     ('campus-as1', 'BLDG 2'). 'campus-as1' -> ('campus-as1', '')."""
+    if _IPV6.match((caption or '').strip()):         # a node captioned by its IPv6 address
+        return caption.strip(), ''
     m = _CAPTION.match(caption or '')
     if not m:
         return (caption or '').strip(), ''

@@ -13,7 +13,9 @@ state; older ones are kept so changes between imports can be listed.
     <workspace>/settings.json    {"keep_unreached_days": null, "include_optics": false,
                                   "network_order": [...], "checked_networks": [...],
                                   "exclude": {"NETWORK": ["PS-*", ...]},
-                                  "shared_serials": ["FOC00000000X", ...]}
+                                  "shared_serials": ["FOC00000000X", ...],
+                                  "kind_rules": [["power", "pid", "^C9350-PWR"], ...],
+                                  "role_rules": [["access", "^C9350"], ...]}
 
 Exclusion rules hide devices (e.g. another team's equipment on a shared SolarWinds) from
 everything shown and written. They are applied when a snapshot is loaded, so the devices are
@@ -34,8 +36,9 @@ import shutil
 
 from . import VERSION
 from .splitter import split_inputs
-from .model import (build_devices, display_name, drop_unserialized, excluded_by, hide_optics,
-                    include_rules, load_node_list, mark_shared_serials)
+from .model import (apply_kind_rules, build_devices, display_name, drop_unserialized, excluded_by,
+                    hide_optics, include_rules, load_node_list, mark_shared_serials)
+from . import kinds, roles
 from .history import DEFAULT_KEEP_DAYS, ROUND_GAP_DAYS, annotate, carry_forward, merge_manual, update_history
 from .manual import manual_stats, read_manual
 
@@ -125,6 +128,13 @@ class Workspace(object):
             rules.pop(network, None)
         self._update_settings(exclude=rules)
 
+    def use_rules(self):
+        """Load the settings' kind_rules / role_rules. Returns the problems (bad entries)."""
+        s = self.settings()
+        self.rule_problems = (kinds.set_extra_rules(s.get('kind_rules'))
+                              + roles.set_extra_rules(s.get('role_rules')))
+        return self.rule_problems
+
     def shared_serials(self):
         """Serials acknowledged as shared by different parts (a factory default serial)."""
         return list(self.settings().get('shared_serials') or [])
@@ -160,6 +170,8 @@ class Workspace(object):
         return snap if raw else self._view(network, snap, optics)
 
     def _view(self, network, snap, optics=None):
+        self.use_rules()
+        apply_kind_rules(snap['devices'])
         if not (self.include_optics() if optics is None else optics):
             hide_optics(snap['devices'])
         mark_shared_serials(snap['devices'], self.shared_serials())
@@ -260,6 +272,7 @@ class Workspace(object):
         Returns the snapshot dict."""
         sections, split_stats = split_inputs(input_path, progress=progress)
         nodes, nodes_info = (load_node_list(nodes_csv) if nodes_csv else ({}, None))
+        self.use_rules()
         fresh, build_stats = build_devices(sections, nodes)
         created = created or _now()
         prev = self.load(network, raw=True)
@@ -360,8 +373,9 @@ def diff_snapshots(old, new):
         if b.get('source') == 'manual' or a.get('source') == 'manual':
             out.extend(_diff_by_serial(h, a, b))
             continue
-        old_parts = {(p['kind'], p['name']): p['serial'] for p in a['hardware']}
-        new_parts = {(p['kind'], p['name']): p['serial'] for p in b['hardware']}
+        # built-in parts go with the chassis (and older snapshots did not list them)
+        old_parts = {(p['kind'], p['name']): p['serial'] for p in a['hardware'] if p['kind'] != 'builtin'}
+        new_parts = {(p['kind'], p['name']): p['serial'] for p in b['hardware'] if p['kind'] != 'builtin'}
         for key in sorted(set(old_parts) | set(new_parts)):
             s1, s2 = old_parts.get(key), new_parts.get(key)
             if s1 == s2:

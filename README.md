@@ -129,8 +129,16 @@ times as needed), and import the manual sheet. Imports less than 30 days apart a
   **Include optics** under Outputs -> Settings lists and counts them (from devices and from the
   manual sheet) without re-importing.
 * **One serial = one part.** A serial listed twice inside one device (a stack or DAC cable seen
-  from both ends, SMART fans sharing a serial) is one part; rows that are part of the chassis
-  itself (an N9K "Slot 1", a FEX's own module) are not listed separately.
+  from both ends, SMART fans sharing a serial) is one part. Parts built into the chassis (a
+  router's route processor, a VG310's FXS ports) are listed as **Built-in** but not counted; one
+  that repeats the chassis serial (an N9K "Slot 1") is not listed at all.
+* **New hardware.** The box is found without knowing the model: the inventory line carrying
+  show version's serial is the chassis, whatever it is called. A part whose kind is not known
+  is still listed and counted (Kind: Unrecognised) and named on the Issues sheet. To name it,
+  add a rule to `inventory_data/settings.json` - no code change, no re-import:
+  `"kind_rules": [["power", "pid", "^C9350-PWR"]]` (kind, field `pid`/`name`/`descr`/`any`,
+  regex) and, for the Role column, `"role_rules": [["access", "^C9350"]]` (the hostname still
+  wins). A rule that cannot be read is named in the status bar.
 * **Part counts** has one row per PID with a Total and a column per network. Each physical part
   is counted once by serial number: a dual-homed FEX (listed under both parent leafs) or a
   Nexus 7700 shared by several VDCs counts as one. Built-in parts (a chassis' own route

@@ -53,12 +53,13 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
     for d in fresh:
         if d.get('mgmt_ip'):
             by_ip.setdefault(d['mgmt_ip'], d)
-    owned = {}                                   # serial -> fresh device that has it
+    owned, owned_parts = {}, {}                  # serial -> fresh device that has it
     for d in fresh:
         if reached(d):
-            for sn in (d['serial'] or '').split(' / '):
-                if sn:
-                    owned[sn] = d
+            for sn in _box_serials(d):
+                owned[sn] = d
+            for sn in _part_serials(d):
+                owned_parts.setdefault(sn, d)
     now = datetime.datetime.strptime(today, '%Y-%m-%d')
     out = [d for d in fresh]
     for p in prev['devices']:
@@ -76,7 +77,10 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
             age = (now - datetime.datetime.strptime(last, '%Y-%m-%d')).days
         except ValueError:
             age = 0
-        holder = owned.get(p['serial'].split(' / ')[0]) if p['serial'] else None
+        if p['serial']:
+            holder = owned.get(p['serial'].split(' / ')[0])
+        else:                                    # no box serial: any of its parts' serials
+            holder = next((owned_parts[s] for s in sorted(_part_serials(p)) if s in owned_parts), None)
         if holder is not None and (norm_host(holder['hostname']) == norm_host(p['hostname'])
                                    or (holder.get('mgmt_ip') and holder['mgmt_ip'] == p.get('mgmt_ip'))):
             continue    # the same box, collected now under another name (e.g. another SolarWinds)
@@ -111,12 +115,26 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
 
 
 def _other_box(cur, p):
-    """Is the fresh device under p's caption a different box: other IP and no serial in common?"""
+    """Is the fresh device under p's caption a different box: other IP and no serial in common?
+    The box serials decide; when either side has none (a model whose chassis was not
+    recognised), any part serial in common - a module, a DSP, a built-in port - means the same
+    box, e.g. one SolarWinds instance reaching it over IPv4 and another over IPv6."""
     if not (cur.get('mgmt_ip') and p.get('mgmt_ip')) or cur['mgmt_ip'] == p['mgmt_ip']:
         return False
-    a = set(s for s in (cur.get('serial') or '').split(' / ') if s)
-    b = set(s for s in (p.get('serial') or '').split(' / ') if s)
-    return not (a & b)
+    a, b = _box_serials(cur), _box_serials(p)
+    if a and b:
+        return not (a & b)
+    return not (_part_serials(cur) & _part_serials(p))
+
+
+def _box_serials(d):
+    return set(s for s in (d.get('serial') or '').split(' / ') if s)
+
+
+def _part_serials(d):
+    """Serials of the parts in the box (optics move between boxes, so they do not count)."""
+    return set(it['serial'] for it in d.get('hardware') or ()
+               if it.get('serial') and it['kind'] != 'transceiver') | _box_serials(d)
 
 
 def _free_key(key, devices):

@@ -10,7 +10,7 @@ import os
 import re
 
 from . import parsers
-from .kinds import kind_of, slot_of, member_of, MODULE_KINDS, KIND_ORDER
+from .kinds import kind_of, slot_of, member_of, MODULE_KINDS, KIND_ORDER, extra_kind
 from .textutil import device_key, is_ipv4, norm_host, read_text, real_serial, short_host, split_caption
 
 OK_STATUS = re.compile(r'(?i)^(ok|active|standby|ha-standby|pass|ready)\b')
@@ -427,6 +427,21 @@ def _apply_module(dev, text, stats):
     dev['_modules'] = mod['rows']
 
 
+def _find_chassis(dev, hw, stacked):
+    """No inventory entry was recognised as the chassis (a model whose chassis line is not
+    named 'Chassis' / 'Switch N'): the entry carrying show version's serial is the chassis,
+    whatever it is called. Without show version, the first inventory entry is - on Cisco gear it
+    always lists the box first - if it was not recognised as anything else."""
+    ver_sn = real_serial(dev.get('_ver_serial'))
+    if ver_sn:
+        for it in hw:
+            if it['kind'] in ('other', 'builtin') and real_serial(it.get('serial')) == ver_sn:
+                it['kind'] = 'chassis'
+                return
+    elif not stacked and hw and hw[0]['kind'] == 'other' and real_serial(hw[0].get('serial')):
+        hw[0]['kind'] = 'chassis'
+
+
 def _finish_device(dev, nodes):
     if not dev['hostname']:
         dev['hostname'] = dev['key']
@@ -452,6 +467,12 @@ def _finish_device(dev, nodes):
                        'descr': t.get('model') or '', 'pid': t.get('model') or '', 'vid': '',
                        'serial': real_serial(t.get('serial')), 'status': '',
                        'sw': t.get('sw_version') or '', 'role': 'active' if t.get('active') else 'member'})
+    if not any(it['kind'] in ('chassis', 'stack_member') for it in hw):
+        _find_chassis(dev, hw, len(table) > 1)
+    chassis_pids = {it['pid'] for it in hw if it['kind'] == 'chassis' and it['pid']}
+    for it in hw:
+        if it['kind'] == 'other' and it['pid'] in chassis_pids:
+            it['kind'] = 'builtin'          # unrecognised, but the chassis' own PID: part of it
     if not any(it['kind'] in ('chassis', 'stack_member') for it in hw) and dev.get('_ver_model'):
         # no chassis in show inventory (or none collected): the box itself, from show version
         hw.insert(0, {'kind': 'chassis', 'slot': '', 'member': '', 'name': 'Chassis (show version)',
@@ -517,9 +538,7 @@ def drop_unserialized(dev):
     members from what is left. Safe to run again (e.g. on a snapshot from an older version)."""
     keep, gone, seen, builtin = [], [], set(), []
     for it in dev['hardware']:
-        if it['kind'] == 'builtin':        # part of the chassis (N9K 'Slot 1', a FEX's own module)
-            if real_serial(it.get('serial')):
-                builtin.append(it)
+        if it['kind'] == 'builtin':
             continue
         it['serial'] = real_serial(it.get('serial'))
         if not it['serial']:
@@ -527,6 +546,17 @@ def drop_unserialized(dev):
         elif it['serial'] not in seen:     # one serial = one part: both ends of a stack / DAC
             seen.add(it['serial'])         # cable, SMART fans sharing a serial
             keep.append(it)
+    for it in dev['hardware']:
+        # part of the chassis (a VG310's FXS ports, a router's 'module R0', a FEX's own module):
+        # listed, never counted; dropped when it repeats a serial already listed (N9K 'Slot 1'
+        # carries the chassis serial), quietly when it has none
+        if it['kind'] == 'builtin':
+            it['serial'] = real_serial(it.get('serial'))
+            if it['serial']:
+                builtin.append(it)
+                if it['serial'] not in seen:
+                    seen.add(it['serial'])
+                    keep.append(it)
     dev['hardware'] = keep
     dev['members'] = [it for it in keep if it['kind'] == 'stack_member']
     dev['no_serial'] = dev.get('no_serial', []) + [
@@ -551,6 +581,24 @@ def drop_unserialized(dev):
         dev['model'] = dev.get('model') or builtin[0]['pid']
         dev['serial'] = real_serial(builtin[0]['serial'])
     return gone
+
+
+def apply_kind_rules(devices):
+    """Re-check parts still 'other' against the settings rules (kinds.set_extra_rules), so a
+    rule added after an import applies without re-importing; then flag what is still
+    unrecognised, one issue per device."""
+    for d in devices:
+        left = []
+        for it in d['hardware']:
+            if it['kind'] == 'other':
+                it['kind'] = extra_kind(it) or 'other'
+                if it['kind'] == 'other':
+                    left.append(it)
+        if left and d.get('source') != 'manual':
+            d['warnings'].append('Unrecognised part%s (listed and counted as Unrecognised; a '
+                                 'kind_rules entry in settings.json can name it): %s'
+                                 % ('s' if len(left) > 1 else '',
+                                    ', '.join('%s %s' % (it['name'], it['pid']) for it in left)))
 
 
 def hide_optics(devices):

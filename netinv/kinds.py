@@ -4,7 +4,8 @@ Rules are plain data, checked top to bottom; the first match wins. Part-number
 (PID) rules come before description keywords because descriptions mislead, e.g.
 a C9400-LC-24XS line card's description contains "(SFP+)".
 
-In the full tool this table moves to an editable rules file.
+Extra rules can be added without editing this file: settings.json "kind_rules" (see
+set_extra_rules). They are checked before the built-in ones.
 """
 
 import re
@@ -18,7 +19,7 @@ OTHER_KINDS = ('chassis', 'stack_member', 'fex', 'power', 'fan', 'builtin', 'oth
 EXCLUDED_KINDS = ('stack',)
 # Order of kinds in lists and the Part counts sheet.
 KIND_ORDER = ('chassis', 'stack_member', 'fex', 'supervisor', 'linecard', 'fabric', 'sysctrl',
-              'module', 'power', 'fan', 'transceiver', 'other')
+              'module', 'power', 'fan', 'transceiver', 'builtin', 'other')
 
 KIND_LABELS = {
     'chassis': 'Chassis', 'stack_member': 'Stack member', 'fex': 'Fabric extender (FEX)', 'supervisor': 'Supervisor',
@@ -36,6 +37,9 @@ _INTF_NAME = (r'^(Gi|Te|Fo|Hu|Twe|Tw|Fi|Ap|Et|Eth|Ethernet|GigabitEthernet|TenGi
 RULES = [
     ('stack', 'name', r'(?i)\bstack$'),
     ('chassis', 'name', r'(?i)^(chassis|rack)(\s*\d+)?$'),
+    # Cisco VG310: the chassis is named after the model; its FXS ports are built in
+    ('chassis', 'name', r'(?i)^VG310$'),
+    ('builtin', 'name', r'(?i)^onboard \d+ FXS voice interface on Slot \d+ SubSlot \d+$'),
     ('stack_member', 'name', r'(?i)^(switch\s*)?\d+$'),
     ('builtin', 'name', r'(?i)^module\s+[RF]\d+$'),
     ('builtin', 'name', r'(?i)^NIM subslot 0/\d+$'),     # ISR4K / C8300 front-panel ports
@@ -68,12 +72,41 @@ RULES = [
     ('transceiver', 'descr', r'(?i)\bSFP\b|\bQSFP|GBIC|XFP|BASE-|Gbase'),
 ]
 _COMPILED = [(kind, field, re.compile(rx)) for kind, field, rx in RULES]
+_EXTRA = []
+_FIELDS = ('name', 'descr', 'pid', 'any')
+
+
+def set_extra_rules(rules):
+    """Rules from settings.json "kind_rules": [[kind, field, regex], ...], e.g.
+    ["power", "pid", "^C9350-PWR"]. They are checked before the built-in rules. Returns a
+    list of problems (bad entries are skipped)."""
+    good, problems = [], []
+    for r in rules or []:
+        try:
+            kind, field, rx = r
+            if kind not in KIND_LABELS or field not in _FIELDS:
+                raise ValueError('kind must be one of %s, field one of %s'
+                                 % (', '.join(k for k in KIND_ORDER), ', '.join(_FIELDS)))
+            good.append((kind, field, re.compile(rx)))
+        except (TypeError, ValueError, re.error) as exc:
+            problems.append('kind_rules %r: %s' % (r, exc))
+    _EXTRA[:] = good
+    return problems
+
+
+def extra_kind(item):
+    """The kind from the settings rules only, or ''."""
+    return _match(_EXTRA, item) or ''
 
 
 def kind_of(item):
     """Return the kind for one inventory item dict (name/descr/pid)."""
+    return _match(_EXTRA, item) or _match(_COMPILED, item) or 'other'
+
+
+def _match(rules, item):
     name, descr, pid = item.get('name', ''), item.get('descr', ''), item.get('pid', '')
-    for kind, field, rx in _COMPILED:
+    for kind, field, rx in rules:
         if field == 'name':
             hit = rx.search(name)
         elif field == 'descr':
@@ -84,7 +117,7 @@ def kind_of(item):
             hit = rx.search(name) or rx.search(descr)
         if hit:
             return kind
-    return 'other'
+    return None
 
 
 def slot_of(item):

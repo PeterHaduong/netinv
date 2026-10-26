@@ -68,7 +68,10 @@ def parse_version(text):
     r['router_mode'] = _first(r'^\s*Router operating mode:\s*(.+?)\s*$', text)
     r['confreg'] = _first(r'^\s*Configuration register is\s+(\S+)', text)
     r['model'] = (_first(r'^\s*Model [Nn]umber\s*:\s*(\S+)', text)
-                  or _first(r'^\s*cisco\s+(\S+)(?:\s+\([^)]*\))?\s+processor', text, re.M | re.I))
+                  or _first(r'^\s*cisco\s+(\S+)(?:\s+\([^)]*\))?\s+processor', text, re.M | re.I)
+                  # ISR G2 / VG3x0: 'Cisco VG310 (revision 1.0) with 474112K/50176K bytes of memory.'
+                  or _first(r'^\s*cisco\s+(\S+)\s+\(revision[^)]*\)\s+with\s+\S+\s+bytes of memory',
+                            text, re.M | re.I))
     r['serial'] = (_first(r'^\s*System [Ss]erial [Nn]umber\s*:\s*(\S+)', text)
                    or _first(r'Processor [Bb]oard ID\s+(\S+)', text))
 

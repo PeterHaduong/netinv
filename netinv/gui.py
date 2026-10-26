@@ -271,10 +271,11 @@ class App(object):
         """n pixels at 100 % scaling -> pixels at the current scaling."""
         return int(round(n * self.scale))
 
-    def _autosize(self, tree, cap=380, wide_cap=700, max_rows=4000, stretch=None):
+    def _autosize(self, tree, cap=380, wide_cap=None, max_rows=4000, stretch=None):
         """Fit each column to its heading and contents (measured with the fonts in use).
-        The stretch column (default: the last - notes / details) may grow wider and takes up
-        the rest of the window."""
+        The stretch column (default: the last - notes / details) is as wide as its longest text
+        (wide_cap: limit it), so the horizontal scrollbar reaches the end; it also takes up the
+        rest of the window."""
         cols = list(tree['columns'])
         has_tree = 'tree' in str(tree.cget('show'))
         pad = self.px(18)
@@ -299,7 +300,8 @@ class App(object):
             todo.extend((child, depth + 1) for child in tree.get_children(iid))
         last = stretch or (cols[-1] if cols else None)
         for c, w in widths.items():
-            tree.column(c, width=min(w, self.px(wide_cap if c == last else cap)), stretch=(c == last))
+            limit = wide_cap if c == last else cap
+            tree.column(c, width=w if limit is None else min(w, self.px(limit)), stretch=(c == last))
 
     def _build(self):
         # Left panel packed first so it always keeps its width; the tabs take the rest (the
@@ -534,6 +536,8 @@ class App(object):
             except Exception as exc:
                 self.set_status('Could not read %s: %s' % (n, exc))
         self.order = [n for n in self.ws.networks() if n in self.snaps]
+        if getattr(self.ws, 'rule_problems', None):
+            self.set_status('settings.json: ' + '; '.join(self.ws.rule_problems))
         self.checked = set(self.ws.checked_networks())
         if select:
             self.checked.add(select)
