@@ -91,7 +91,8 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS, shared_seri
             holder = owned.get(p['serial'].split(' / ')[0])
         else:                                    # no box serial: any of its parts' serials
             holder = _part_holder(p, owned_parts, weak)
-        if holder is not None and (norm_host(holder['hostname']) == norm_host(p['hostname'])
+        if holder is not None and (not p['serial']          # found by its parts: that box itself
+                                   or norm_host(holder['hostname']) == norm_host(p['hostname'])
                                    or (holder.get('mgmt_ip') and holder['mgmt_ip'] == p.get('mgmt_ip'))):
             continue    # the same box, collected now under another name (e.g. another SolarWinds)
         if not p.get('stale') and age <= ROUND_GAP_DAYS:      # collected earlier this round
@@ -140,12 +141,15 @@ def _same_by_parts(x, y, weak=()):
     """Two records, at least one without a box serial: the same box only when the parts agree -
     two or more serials in common (default serials left out), a box serial on either side found
     among the other's parts, and no part number fitted once on each side with two different
-    serials. Otherwise they are kept apart: listed twice at worst, never one box lost."""
+    serials (unless one side's box serial is among the other's parts: then it is that box, a
+    swapped PSU or not). Otherwise they are kept apart: listed twice at worst, never one box lost."""
     weak = set(weak)
     px, py = _part_serials(x) - weak, _part_serials(y) - weak
     for box, other in ((_box_serials(x), py), (_box_serials(y), px)):
         if box and not (box & other):
             return False
+    if any(box - weak and (box - weak) & other for box, other in ((_box_serials(x), py), (_box_serials(y), px))):
+        return True                       # the box's own serial is among the other's parts: the box
     if len(px & py) < 2:
         return False
     once_x, once_y = _single_pids(x, weak), _single_pids(y, weak)

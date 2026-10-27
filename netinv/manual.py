@@ -175,7 +175,7 @@ def read_manual(path, default_network=''):
         if any(it['serial'] == serial for it in d['hardware']):
             d['warnings'].append('Row %d: serial %s is listed twice - kept once' % (n, serial))
             continue
-        item = {'kind': kind, 'kind_given': bool(kind_text and _KIND_WORDS.get(kind_text.lower())),
+        item = {'kind': kind, 'kind_given': bool(kind_text and _KIND_WORDS.get(kind_text.lower()) not in (None, 'other')),
                 'name': unit or pid, 'descr': descr, 'pid': pid, 'vid': '',
                 'serial': serial, 'status': '', 'sw': '', 'notes': get(row, 'notes'), 'row': n,
                 'role': get(row, 'status') or ('Spare' if d['stock'] else 'Installed'),

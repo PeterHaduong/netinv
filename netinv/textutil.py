@@ -49,7 +49,7 @@ def norm_host(name):
         return ''
     name = name.strip().strip('"')
     name = re.sub(r'\s*\(.*\)$', '', name).strip()
-    if not is_ipv4(name):
+    if not is_ip(name):
         name = name.split('.')[0]
     return name.lower()
 
@@ -57,7 +57,7 @@ def norm_host(name):
 def short_host(name):
     """'as1.example.com' -> 'as1' (case kept). IP addresses are left alone."""
     name = (name or '').strip()
-    return name if is_ipv4(name) else name.split('.')[0]
+    return name if is_ip(name) else name.split('.')[0]
 
 
 _IPV6 = re.compile(r'^[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:\d{1,3}(?:\.\d{1,3}){3})?(?:%[\w/.:-]+)?(?=\s|$|[(\[{<"-])')

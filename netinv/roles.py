@@ -77,8 +77,8 @@ def valid_rules(rules):
     out = []
     for r in rule_list(rules, 'role_rules'):
         try:
-            compile_role_rule(r)
-            out.append(list(r))
+            role, rx = compile_role_rule(r)
+            out.append([role, rx.pattern])
         except (TypeError, ValueError, re.error):
             pass
     return out

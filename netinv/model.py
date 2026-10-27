@@ -91,7 +91,7 @@ class _Parsed(object):
 
     @staticmethod
     def _work(sec):
-        out = {'quality': 0, 'hostname': '', 'inv': set(), 'ver': set()}
+        out = {'quality': 0, 'hostname': '', 'inv': set(), 'ver': set(), 'all': set()}
         if sec.cmd == 'error' or not sec.text.strip() or parsers.is_unsupported(sec.text):
             return out                          # nothing usable: an error, empty or rejected
         out['quality'] = 1
@@ -108,7 +108,13 @@ class _Parsed(object):
             if items:
                 out['quality'] = 2
             for it in items:
-                if it['serial'] and kind_of(it) in _HW_IDENTITY:
+                if not it['serial']:
+                    continue
+                out['all'].add(it['serial'])
+                kind = kind_of(it)
+                # the box's own line: a recognised chassis / member, or an unrecognised line whose
+                # description says so ('CISCO2911/K9 chassis, Hw Serial#...', see _find_chassis)
+                if kind in _HW_IDENTITY or (kind == 'other' and re.search(r'(?i)\bchassis\b', it['descr'] or '')):
                     out['inv'].add(it['serial'])
         else:
             out['quality'] = 2
@@ -163,6 +169,10 @@ def _different_boxes(a, b):
         # one side has only inventory serials, the other only a show version serial: they
         # cannot be compared. Different IP addresses then mean two boxes (listed twice at
         # worst - better than one of them vanishing into the other)
+        # A show version serial anywhere in the other side's inventory is the same box (NX-OS
+        # reports the supervisor's serial; an ISR G2 its chassis line's)
+        if (a['ver'] & b.get('all', set())) or (b['ver'] & a.get('all', set())):
+            return False
         return not ((a['inv'] | a['ver']) & (b['inv'] | b['ver'])) and not (a['ips'] & b['ips'])
     return False
 
@@ -197,7 +207,7 @@ def _group_sections(sections, stats):
             key = device_key(sec.host, sec.note)
         bid = (key, getattr(sec, 'block', None) or (sec.path,))
         if bid not in blocks:
-            blocks[bid] = {'key': key, 'secs': [], 'ips': set(), 'inv': set(), 'ver': set(), 'host': '',
+            blocks[bid] = {'key': key, 'secs': [], 'ips': set(), 'inv': set(), 'ver': set(), 'all': set(), 'host': '',
                            'data': False, 'caption': _caption(sec) if sec.host else key}
             order.append(bid)
         b = blocks[bid]
@@ -207,6 +217,7 @@ def _group_sections(sections, stats):
         p = _Parsed.of(sec)
         b['inv'] |= p['inv']
         b['ver'] |= p['ver']
+        b['all'] |= p['all']
         if sec.cmd in ('version', 'inventory') and p['quality'] > 0:
             b['data'] = True
         if p['hostname'] and (not b['host'] or p['quality'] == 2):
@@ -214,6 +225,7 @@ def _group_sections(sections, stats):
 
     owner = dict((bid, bid) for bid in order)
     comp = dict((bid, {'inv': set(blocks[bid]['inv']), 'ver': set(blocks[bid]['ver']), 'ips': set(blocks[bid]['ips']),
+                       'all': set(blocks[bid]['all']),
                        'hosts': set([blocks[bid]['host']]) - set([''])}) for bid in order)
     why = {}
 
@@ -233,6 +245,7 @@ def _group_sections(sections, stats):
         owner[rb] = ra
         ca['inv'] |= cb['inv']
         ca['ver'] |= cb['ver']
+        ca['all'] |= cb['all']
         ca['ips'] |= cb['ips']
         ca['hosts'] |= cb['hosts']
         if reason:

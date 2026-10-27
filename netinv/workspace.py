@@ -238,7 +238,8 @@ class Workspace(object):
     def settings(self):
         try:
             with open(os.path.join(self.root, 'settings.json'), encoding='utf-8') as fh:
-                return json.load(fh)
+                s = json.load(fh)
+            return s if isinstance(s, dict) else {}     # a file that is not {...}: as if empty
         except (OSError, ValueError):
             return {}
 

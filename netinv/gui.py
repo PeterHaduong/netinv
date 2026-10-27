@@ -232,6 +232,7 @@ class ExclusionDialog(tk.Toplevel):
         f.columnconfigure(1, weight=1)
         f.rowconfigure(1, weight=1)
         self._preview()
+        _fit_screen(self, width=760)
         self.grab_set()
 
     def _rules(self):
@@ -269,8 +270,12 @@ class RulesDialog(tk.Toplevel):
         self.transient(parent)
         settings = app.ws.settings()
         # every entry is kept - one that cannot be used is listed as 'not valid' to fix or remove
-        self.kind_rules = [list(r) if isinstance(r, tuple) else r for r in rule_list(settings.get('kind_rules'), '')]
-        self.role_rules = [list(r) if isinstance(r, tuple) else r for r in rule_list(settings.get('role_rules'), '')]
+        def entries(value):
+            if value in (None, ''):
+                return []
+            return [list(r) if isinstance(r, tuple) else r for r in value] if isinstance(value, list) else [value]
+        self.kind_rules = entries(settings.get('kind_rules'))
+        self.role_rules = entries(settings.get('role_rules'))
         self.parts, self.devices = [], []       # as parsed, before any local rule
         for net in app.ws.networks():
             snap = app.ws.load(net, raw=True)
@@ -298,9 +303,11 @@ class RulesDialog(tk.Toplevel):
         self._build_roles()
         self._fill_kinds()
         self._fill_roles()
+        bb.lift()                                # Tab order: Save / Cancel last
         _fit_screen(self, width=980)
         self.minsize(min(self.k_form.winfo_reqwidth() + _px(self, 40), self.winfo_screenwidth() - _px(self, 20)),
-                     _px(self, 420))
+                     min(_px(self, 420), self.winfo_screenheight() - _px(self, 110)))
+        self.bind('<Escape>', lambda e: self.destroy())
         self.grab_set()
         if pid:
             self.k_pattern_entry.focus_set()
@@ -333,6 +340,7 @@ class RulesDialog(tk.Toplevel):
         ttk.Button(b, text='Remove', command=remove).pack(side='left')
         ttk.Button(b, text='▲', width=3, command=lambda: move(-1)).pack(side='left', padx=(6, 0))
         ttk.Button(b, text='▼', width=3, command=lambda: move(1)).pack(side='left')
+        b.lift()                                 # Tab order: the pattern before these buttons
 
     @staticmethod
     def _picked(tree):
@@ -352,7 +360,7 @@ class RulesDialog(tk.Toplevel):
         self.tabs.add(tab, text='Part kinds')
         box, self.k_tree = self._table(tab, ('kind', 'field', 'pattern', 'n'),
                                        ('Kind', 'Matches on', 'Pattern', 'Parts'),
-                                       (170, 140, 260, 60), 5, 'pattern')
+                                       (170, 140, 260, 60), 3, 'pattern')
         box.pack(fill='x')
         self.k_tree.bind('<<TreeviewSelect>>', lambda e: self._kind_selected())
         row = self.k_form = ttk.Frame(tab)
@@ -368,6 +376,7 @@ class RulesDialog(tk.Toplevel):
                            lambda s: self._move(self.kind_rules, self.k_tree, self._fill_kinds, s))
         self.k_pattern_entry = ttk.Entry(row, textvariable=self.k_pattern, width=24)
         self.k_pattern_entry.pack(side='left', fill='x', expand=True)
+        self.k_pattern_entry.bind('<Return>', lambda e: self._kind_add())
         for v in (self.k_kind, self.k_field, self.k_pattern):
             v.trace_add('write', lambda *a: self._kind_preview())
         self.k_error = ttk.Label(tab, foreground='#C00000')
@@ -427,6 +436,7 @@ class RulesDialog(tk.Toplevel):
         kids = self.k_tree.get_children()
         if select is not None and kids:
             self.k_tree.selection_set(kids[min(select, len(kids) - 1)])
+            self.k_tree.see(kids[min(select, len(kids) - 1)])
         self._kind_preview()
         self._summary()
 
@@ -451,7 +461,7 @@ class RulesDialog(tk.Toplevel):
 
     def _kind_update(self):
         i, rule = self._picked(self.k_tree), self._kind_form()
-        if i is not None and rule:
+        if i is not None and rule and rule not in self.kind_rules[:i] + self.kind_rules[i + 1:]:
             self.kind_rules[i] = rule
             self._fill_kinds(select=i)
 
@@ -472,7 +482,7 @@ class RulesDialog(tk.Toplevel):
         note.pack(fill='x', pady=(0, 6))
         _wrap_to(tab, note, _px(self, 20))
         box, self.r_tree = self._table(tab, ('role', 'pattern', 'n'), ('Role', 'Model pattern', 'Devices'),
-                                       (200, 300, 70), 5, 'pattern')
+                                       (200, 300, 70), 3, 'pattern')
         box.pack(fill='x')
         self.r_tree.bind('<<TreeviewSelect>>', lambda e: self._role_selected())
         row = ttk.Frame(tab)
@@ -483,7 +493,9 @@ class RulesDialog(tk.Toplevel):
                      values=sorted(set(ROLE_LABEL.values()))).pack(side='left')
         self._form_buttons(row, self._role_add, self._role_update, self._role_remove,
                            lambda s: self._move(self.role_rules, self.r_tree, self._fill_roles, s))
-        ttk.Entry(row, textvariable=self.r_pattern, width=24).pack(side='left', padx=4, fill='x', expand=True)
+        r_entry = ttk.Entry(row, textvariable=self.r_pattern, width=24)
+        r_entry.pack(side='left', padx=4, fill='x', expand=True)
+        r_entry.bind('<Return>', lambda e: self._role_add())
         for v in (self.r_role, self.r_pattern):
             v.trace_add('write', lambda *a: self._role_preview())
         self.r_error = ttk.Label(tab, foreground='#C00000')
@@ -536,6 +548,7 @@ class RulesDialog(tk.Toplevel):
         kids = self.r_tree.get_children()
         if select is not None and kids:
             self.r_tree.selection_set(kids[min(select, len(kids) - 1)])
+            self.r_tree.see(kids[min(select, len(kids) - 1)])
         self._role_preview()
         self._summary()
 
@@ -557,7 +570,7 @@ class RulesDialog(tk.Toplevel):
 
     def _role_update(self):
         i, rule = self._picked(self.r_tree), self._role_form()
-        if i is not None and rule:
+        if i is not None and rule and rule not in self.role_rules[:i] + self.role_rules[i + 1:]:
             self.role_rules[i] = rule
             self._fill_roles(select=i)
 
@@ -575,6 +588,21 @@ class RulesDialog(tk.Toplevel):
                                    len(self.role_rules), '' if len(self.role_rules) == 1 else 's'))
 
     def _save(self):
+        pending = []
+        k, r = self._kind_form(), self._role_form()
+        if k and k not in self.kind_rules:
+            pending.append(('part', k))
+        if r and r not in self.role_rules:
+            pending.append(('role', r))
+        if pending:
+            ans = messagebox.askyesnocancel('Part and role rules', 'Add the rule you typed before saving?\n\n'
+                                            + '\n'.join('%s rule: %s' % (w, ' / '.join(x)) for w, x in pending),
+                                            parent=self)
+            if ans is None:
+                return
+            if ans:
+                self.kind_rules += [x for w, x in pending if w == 'part']
+                self.role_rules += [x for w, x in pending if w == 'role']
         self.app.ws.set_rules(self.kind_rules, self.role_rules)
         self.destroy()
         self.app.refresh_networks()
@@ -653,7 +681,10 @@ class App(object):
         last = stretch or (cols[-1] if cols else None)
         for c, w in widths.items():
             limit = wide_cap if c == last else (name_cap if c in names else cap)
-            tree.column(c, width=w if limit is None else min(w, self.px(limit)), stretch=(c == last))
+            width = w if limit is None else min(w, self.px(limit))
+            # the stretch column's minwidth = its width: ttk would otherwise shrink it to fit the
+            # widget whenever the table is refilled on screen (notes cut to one letter)
+            tree.column(c, width=width, minwidth=width if c == last else self.px(20), stretch=(c == last))
 
     def _build(self):
         # Left panel packed first so it always keeps its width; the tabs take the rest (the
@@ -671,7 +702,7 @@ class App(object):
         ttk.Button(head, text='All', width=4, command=lambda: self.set_checked(self.order)).pack(side='right', padx=2)
         # One row per network: the box shows / hides it (everywhere, and in the outputs); clicking
         # the name picks it for Move / Export / Remove / Exclusion rules; double-click = only this.
-        self.netlist = ttk.Treeview(left, show='tree', selectmode='browse', height=10)
+        self.netlist = ttk.Treeview(left, show='tree', selectmode='browse', height=4)    # grows with the window
         self.netlist.column('#0', width=self.px(240))
         self.netlist.pack(fill='both', expand=True, pady=4)
         self.netlist.bind('<Button-1>', self._net_click)
@@ -709,6 +740,8 @@ class App(object):
         self.tabs.add(tab, text='Inventory')
         bar = ttk.Frame(tab)
         bar.pack(fill='x')
+        self.inv_count = ttk.Label(bar, text='')
+        self.inv_count.pack(side='right')
         ttk.Label(bar, text='Search').pack(side='left')
         self.search = tk.StringVar()
         e = ttk.Entry(bar, textvariable=self.search, width=30)
@@ -717,8 +750,6 @@ class App(object):
         ttk.Button(bar, text='Expand all', command=lambda: self._expand(True)).pack(side='left', padx=2)
         ttk.Button(bar, text='Collapse all', command=lambda: self._expand(False)).pack(side='left', padx=2)
         ttk.Button(bar, text='Exclusion rules...', command=self.do_exclusion_rules).pack(side='left', padx=(12, 2))
-        self.inv_count = ttk.Label(bar, text='')
-        self.inv_count.pack(side='right')
         acts = ttk.Frame(tab)                    # second row: what to do with the selected device(s)
         acts.pack(fill='x', pady=(4, 0))
         ttk.Label(acts, text='Selected device:').pack(side='left')
@@ -826,14 +857,14 @@ class App(object):
         ]
         hints = []
         for i, (label, hint, cmd) in enumerate(actions):
-            b = ttk.Button(tab, text=label, width=22, command=cmd)
-            b.grid(row=2 + i, column=0, sticky='w', pady=4)
+            b = ttk.Button(tab, text=label, command=cmd)
+            b.grid(row=2 + i, column=0, sticky='we', pady=2)
             hints.append(ttk.Label(tab, text=hint, foreground='#555', justify='left'))
             hints[-1].grid(row=2 + i, column=1, columnspan=2, sticky='w')
         tab.bind('<Configure>', lambda e: [h.config(wraplength=max(e.width - b.winfo_reqwidth() - self.px(40),
                                                                    self.px(150))) for h in hints], add='+')
         opts = ttk.LabelFrame(tab, text='Settings', padding=8)
-        opts.grid(row=2 + len(actions), column=0, columnspan=3, sticky='we', pady=(16, 0))
+        opts.grid(row=2 + len(actions), column=0, columnspan=3, sticky='we', pady=(8, 0))
         self.optics = tk.BooleanVar(value=self.ws.include_optics())
         ttk.Checkbutton(opts, text='Include optics (SFPs) - from devices and spares on the manual sheet',
                         variable=self.optics, command=self.do_optics).grid(row=0, column=0, columnspan=4, sticky='w')
@@ -884,10 +915,10 @@ class App(object):
         right = ttk.Frame(body)
         right.pack(side='top', fill='both', expand=True, pady=(10, 0))
         ttk.Label(right, text='Script to paste:').pack(anchor='w')
-        self.script = tk.Text(right, height=10, width=60, font=('Consolas', 10))
+        bb = ttk.Frame(right)                    # packed before the text: never squeezed out
+        bb.pack(side='bottom', fill='x', pady=4)
+        self.script = tk.Text(right, height=4, width=60, font=('Consolas', 10))
         self.script.pack(fill='both', expand=True)
-        bb = ttk.Frame(right)
-        bb.pack(fill='x', pady=4)
         ttk.Button(bb, text='Copy to clipboard', command=self._copy_script).pack(side='left')
         ttk.Button(bb, text='Save as .txt...', command=self._save_script).pack(side='left', padx=6)
         self._refresh_script()
@@ -978,8 +1009,9 @@ class App(object):
         for n in self.selected_networks():
             s = self.snaps[n]
             excl, count = len(s.get('excluded', [])), len(self.ws.snapshots(n))
-            lines[n] = ('%s: %d devices%s, imported %s (%d snapshot%s)'
-                        % (n, sum(1 for d in s['devices'] if in_inventory(d)),
+            devs = sum(1 for d in s['devices'] if in_inventory(d))
+            lines[n] = ('%s: %d device%s%s, imported %s (%d snapshot%s)'
+                        % (n, devs, '' if devs == 1 else 's',
                            (' (%d excluded)' % excl) if excl else '', s['created'][:16],
                            count, '' if count == 1 else 's'))
         info = [lines[n] for n in self.selected_networks()]
@@ -1093,7 +1125,7 @@ class App(object):
                 if not self.tree.get_children(gid):       # nothing excluded matches the search
                     self.tree.delete(gid)
                     del self.group_rows[gid]
-        self.inv_count.config(text='%d devices shown' % shown)
+        self.inv_count.config(text='%d device%s shown' % (shown, '' if shown == 1 else 's'))
         self._autosize(self.tree, names=('#0',))
         if same_view:
             if not reselect:                  # the selected device was forgotten / (ex/in)cluded:
@@ -1319,8 +1351,10 @@ class App(object):
 
     def _update_exclude_button(self):
         picked = self._picked_devices()
-        include = bool(picked) and all(d.get('excluded_by') for _, d in picked)
-        self.excl_button.config(text='Include selected device' if include else 'Exclude selected device')
+        excluded = [bool(d.get('excluded_by')) for _, d in picked]
+        self.excl_button.config(text='Exclude / include selected' if picked and any(excluded) and not all(excluded)
+                                else 'Include selected device' if picked and all(excluded)
+                                else 'Exclude selected device')
         serials = self._picked_serials()
         unmark = bool(serials) and set(serials) <= set(self.ws.shared_serials())
         self.shared_button.config(text='Unmark shared serial' if unmark else 'Mark serial as shared/default')
@@ -1394,6 +1428,10 @@ class App(object):
         return 'break'
 
     def do_rules(self, pid=''):
+        for w in self.root.winfo_children():
+            if isinstance(w, RulesDialog) and w.winfo_exists():
+                w.lift()                         # already open (e.g. a triple-click)
+                return
         RulesDialog(self.root, self, pid)
 
     def do_exclusion_rules(self):
