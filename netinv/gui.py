@@ -282,6 +282,11 @@ class RulesDialog(tk.Toplevel):
             for d in (snap or {}).get('devices', []):
                 self.devices.append((net, d))
                 self.parts += [(net, d, it) for it in d['hardware'] if it['kind'] not in BOX_KINDS]
+        counts = {}                             # rule counts: each distinct part once, with its number
+        for _, _, it in self.parts:
+            k = (it.get('name', ''), it.get('descr', ''), it.get('pid', ''))
+            counts[k] = counts.get(k, 0) + 1
+        self.distinct = [({'name': k[0], 'descr': k[1], 'pid': k[2]}, n) for k, n in counts.items()]
         f = ttk.Frame(self, padding=10)
         f.pack(fill='both', expand=True)
         intro = ttk.Label(f, wraplength=_px(self, 700), justify='left', text=(
@@ -342,6 +347,15 @@ class RulesDialog(tk.Toplevel):
         ttk.Button(b, text='▼', width=3, command=lambda: move(1)).pack(side='left')
         b.lift()                                 # Tab order: the pattern before these buttons
 
+    PREVIEW_ROWS = 1000
+
+    def _soon(self, which, fn):
+        """Run a preview once typing pauses (200 ms): with many networks it scans every part."""
+        jobs = self.__dict__.setdefault('_jobs', {})
+        if jobs.get(which):
+            self.after_cancel(jobs[which])
+        jobs[which] = self.after(200, fn)
+
     @staticmethod
     def _picked(tree):
         sel = tree.selection()
@@ -378,7 +392,7 @@ class RulesDialog(tk.Toplevel):
         self.k_pattern_entry.pack(side='left', fill='x', expand=True)
         self.k_pattern_entry.bind('<Return>', lambda e: self._kind_add())
         for v in (self.k_kind, self.k_field, self.k_pattern):
-            v.trace_add('write', lambda *a: self._kind_preview())
+            v.trace_add('write', lambda *a: self._soon('kind', self._kind_preview))
         self.k_error = ttk.Label(tab, foreground='#C00000')
         self.k_error.pack(fill='x', pady=(2, 0))
         ttk.Label(tab, text='Parts the pattern above matches (as NetInv classifies them):').pack(anchor='w', pady=(6, 2))
@@ -406,11 +420,14 @@ class RulesDialog(tk.Toplevel):
         if not rule:
             return
         r = compile_rule(rule)
-        for net, d, it in self.parts:
-            if rule_hits(r, it):
-                self.k_hits.insert('', 'end', values=(net, display_name(d), it['name'], it['pid'], it['descr'],
-                                                      KIND_LABELS.get(it['kind'], it['kind'])))
-        self.app._autosize(self.k_hits, stretch='descr')
+        hits = [(net, d, it) for net, d, it in self.parts if rule_hits(r, it)]
+        for net, d, it in hits[:self.PREVIEW_ROWS]:
+            self.k_hits.insert('', 'end', values=(net, display_name(d), it['name'], it['pid'], it['descr'],
+                                                  KIND_LABELS.get(it['kind'], it['kind'])))
+        if len(hits) > self.PREVIEW_ROWS:
+            self.k_hits.insert('', 'end', values=('', '... and %d more parts' % (len(hits) - self.PREVIEW_ROWS),
+                                                  '', '', '', ''))
+        self.app._autosize(self.k_hits, stretch='descr', max_rows=500)
 
     def _fill_kinds(self, select=None):
         self.k_tree.delete(*self.k_tree.get_children())
@@ -421,10 +438,10 @@ class RulesDialog(tk.Toplevel):
                 compiled.append(compile_rule(r))
             except (ValueError, re.error, TypeError):
                 compiled.append(None)
-        for _, _, it in self.parts:                 # the first matching rule names the part
+        for it, n in self.distinct:                 # the first matching rule names the part
             for i, c in enumerate(compiled):
                 if c and rule_hits(c, it):
-                    firsts[i] += 1
+                    firsts[i] += n
                     break
         for r, c, n in zip(self.kind_rules, compiled, firsts):
             if c:
@@ -432,7 +449,7 @@ class RulesDialog(tk.Toplevel):
             else:
                 values = ('(not valid)', '', json.dumps(r), '-')
             self.k_tree.insert('', 'end', values=values)
-        self.app._autosize(self.k_tree, cap=600, stretch='pattern')
+        self.app._autosize(self.k_tree, cap=600, stretch='pattern', max_rows=500)
         kids = self.k_tree.get_children()
         if select is not None and kids:
             self.k_tree.selection_set(kids[min(select, len(kids) - 1)])
@@ -497,7 +514,7 @@ class RulesDialog(tk.Toplevel):
         r_entry.pack(side='left', padx=4, fill='x', expand=True)
         r_entry.bind('<Return>', lambda e: self._role_add())
         for v in (self.r_role, self.r_pattern):
-            v.trace_add('write', lambda *a: self._role_preview())
+            v.trace_add('write', lambda *a: self._soon('role', self._role_preview))
         self.r_error = ttk.Label(tab, foreground='#C00000')
         self.r_error.pack(fill='x', pady=(2, 0))
         ttk.Label(tab, text='Devices whose model the pattern above matches:').pack(anchor='w', pady=(6, 2))
@@ -526,13 +543,16 @@ class RulesDialog(tk.Toplevel):
         if not rule:
             return
         rx = re.compile(rule[1])
-        for net, d in self.devices:
-            if in_inventory(d) and rx.search(d['model'] or ''):
-                by_host = role_from_hostname(d['hostname'])
-                self.r_hits.insert('', 'end', values=(
-                    net, display_name(d), d['model'], role_label(d['hostname'], d['model']) or '-',
-                    ('%s (hostname wins)' % role_name(by_host)) if by_host else role_name(rule[0])))
-        self.app._autosize(self.r_hits, stretch='result')
+        hits = [(net, d) for net, d in self.devices if in_inventory(d) and rx.search(d['model'] or '')]
+        if len(hits) > self.PREVIEW_ROWS:
+            self.r_hits.insert('', 'end', values=('', '%d devices - the first %d:' % (len(hits), self.PREVIEW_ROWS),
+                                                  '', '', ''))
+        for net, d in hits[:self.PREVIEW_ROWS]:
+            by_host = role_from_hostname(d['hostname'])
+            self.r_hits.insert('', 'end', values=(
+                net, display_name(d), d['model'], role_label(d['hostname'], d['model']) or '-',
+                ('%s (hostname wins)' % role_name(by_host)) if by_host else role_name(rule[0])))
+        self.app._autosize(self.r_hits, stretch='result', max_rows=500)
 
     def _fill_roles(self, select=None):
         self.r_tree.delete(*self.r_tree.get_children())
@@ -544,7 +564,7 @@ class RulesDialog(tk.Toplevel):
             except (ValueError, re.error, TypeError):
                 values = ('(not valid)', json.dumps(r), '-')
             self.r_tree.insert('', 'end', values=values)
-        self.app._autosize(self.r_tree, cap=600, stretch='pattern')
+        self.app._autosize(self.r_tree, cap=600, stretch='pattern', max_rows=500)
         kids = self.r_tree.get_children()
         if select is not None and kids:
             self.r_tree.selection_set(kids[min(select, len(kids) - 1)])
@@ -746,7 +766,7 @@ class App(object):
         self.search = tk.StringVar()
         e = ttk.Entry(bar, textvariable=self.search, width=30)
         e.pack(side='left', padx=6)
-        e.bind('<KeyRelease>', lambda ev: self.fill_inventory())
+        e.bind('<KeyRelease>', lambda ev: self._search_soon())
         ttk.Button(bar, text='Expand all', command=lambda: self._expand(True)).pack(side='left', padx=2)
         ttk.Button(bar, text='Collapse all', command=lambda: self._expand(False)).pack(side='left', padx=2)
         ttk.Button(bar, text='Exclusion rules...', command=self.do_exclusion_rules).pack(side='left', padx=(12, 2))
@@ -928,14 +948,50 @@ class App(object):
         """The ticked networks, in the user's order."""
         return [n for n in self.order if n in self.checked and n in self.snaps]
 
+    def _load(self, net, index=-1):
+        """ws.load, remembered while the snapshot file and the settings that shape the view
+        (rules, exclusions, optics, shared serials) are unchanged. The views are only read here."""
+        files = self.ws.snapshots(net)
+        if not files or abs(index) > len(files):
+            return None
+        path = files[index]
+        settings = dict(self.ws.settings())
+        for k in ('checked_networks', 'known_networks', 'network_order'):     # not part of the view
+            settings.pop(k, None)
+        exclude = settings.pop('exclude', None)
+        settings['exclude'] = exclude.get(net) if isinstance(exclude, dict) else exclude   # this network's only
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            stamp = None
+        key = (net, path, stamp, json.dumps(settings, sort_keys=True, default=str))
+        cache = self.__dict__.setdefault('_snap_cache', {})
+        if key not in cache:
+            cache[key] = self.ws.load(net, index)
+        self._cache_used.add(key)
+        return cache[key]
+
     def refresh_networks(self, select=None):
-        """Reload every network (after an import, a rule change ...) and redraw."""
+        """Reload every network (after an import, a rule change ...) and redraw. Snapshots whose
+        file and view settings did not change come from memory (_load)."""
         self.snaps = {}
+        self._cache_used = set()
         for n in self.ws.networks():
             try:
-                self.snaps[n] = self.ws.load(n)
+                self.snaps[n] = self._load(n)
             except Exception as exc:
                 self.set_status('Could not read %s: %s' % (n, exc))
+        for n in self.snaps:                      # the baselines Changes compares with
+            for mode in ('round', 'previous'):
+                i = self.ws.baseline_index(n, mode)
+                if i is not None:
+                    try:
+                        self._load(n, i)
+                    except Exception:
+                        pass
+        cache = self.__dict__.get('_snap_cache', {})
+        for k in [k for k in cache if k not in self._cache_used]:     # forget what is gone
+            del cache[k]
         self.order = [n for n in self.ws.networks() if n in self.snaps]
         if getattr(self.ws, 'rule_problems', None):
             self.set_status('settings.json: ' + '; '.join(self.ws.rule_problems))
@@ -1023,6 +1079,17 @@ class App(object):
         self.netinfo.config(text='\n'.join(info) or (
             'No networks ticked.' if self.order else 'No networks yet - click "Import SolarWinds output...".'))
 
+    def _search_soon(self):
+        """Redraw once typing pauses (250 ms), not on every key: a broad search opens every
+        matching device, which is slow with thousands of devices."""
+        if getattr(self, '_search_job', None):
+            self.root.after_cancel(self._search_job)
+        self._search_job = self.root.after(250, self._search_now)
+
+    def _search_now(self):
+        self._search_job = None
+        self.fill_inventory()
+
     def _tree_state(self):
         """What the user has open / selected / scrolled to, by (network, device key), so a
         refresh (forget, exclude, ticking a network ...) does not throw it away."""
@@ -1032,6 +1099,7 @@ class App(object):
         top = next((i for i, iid in enumerate(rows) if self.tree.bbox(iid)), 0)
         state = {'nets': {}, 'devices': set(), 'selected': set(), 'gone_at': {}, 'top_index': top,
                  'top': self._row_id(rows[top]) if rows else None, 'q': getattr(self, '_last_q', None)}
+        selected = set(self.tree.selection())      # one call: it walks the whole tree
         for nid in self.tree.get_children():
             net = nodes.get(nid, (None, None))[0]
             state['nets'][net] = bool(self.tree.item(nid, 'open'))
@@ -1045,7 +1113,7 @@ class App(object):
                     d = nodes[did][1]
                     if self.tree.item(did, 'open'):
                         state['devices'].add((net, d['key']))
-                    if did in self.tree.selection():
+                    if did in selected:
                         state['selected'].add((net, d['key']))
                         state['gone_at'].setdefault(where, i)    # where to select if it disappears
         return state
@@ -1214,7 +1282,9 @@ class App(object):
             if i is None or net not in self.snaps:
                 out[net] = ('', [])
                 continue
-            old = self.ws.load(net, i)
+            if not hasattr(self, '_cache_used'):
+                self._cache_used = set()
+            old = self._load(net, i)
             out[net] = (old['created'][:16], diff_snapshots(old, self.snaps[net]))
         return out
 
@@ -1504,7 +1574,7 @@ class App(object):
         about = about_sheet([(n, self.snaps[n]) for n in nets], self.ws.include_optics(),
                             shared_serials=self.ws.shared_serials(),
                             kind_rules=settings.get('kind_rules'), role_rules=settings.get('role_rules'))
-        compared = self._changes_for(nets)
+        compared = self._changes_for(nets)       # baselines come from memory (_load)
         changes = dict((n, rows) for n, (_, rows) in compared.items())
         baselines = dict((n, since) for n, (since, _) in compared.items())
 

@@ -339,7 +339,7 @@ class Workspace(object):
         while os.path.exists(path):          # two imports in the same second
             stamp = '%014d' % (int(stamp[:14]) + 1)
             path = os.path.join(folder, 'snapshot_%s-%s.json' % (stamp[:8], stamp[8:14]))
-        body = json.dumps(_jsonable(snap), indent=1, default=str, sort_keys=True)
+        body = json.dumps(_jsonable(snap), default=str, sort_keys=True)     # no indent: the C encoder
         snap_sha = hashlib.sha256(body.encode('utf-8')).hexdigest()
         with open(path, 'w', encoding='utf-8') as fh:
             fh.write(body)

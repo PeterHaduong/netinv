@@ -781,7 +781,8 @@ def check_duplicate_serials(devices):
         if len(hosts) < 2:
             continue
         for dev, it in uses:
-            others = ', '.join(sorted(hosts - {display_name(dev)}))
+            rest = sorted(hosts - {display_name(dev)})
+            others = ', '.join(rest[:5]) + (' and %d more' % (len(rest) - 5) if len(rest) > 5 else '')
             if it['kind'] in _BOX_KINDS:
                 dev['warnings'].append('Serial %s (%s %s) also appears on %s' % (sn, it['name'], it['pid'], others))
             else:
