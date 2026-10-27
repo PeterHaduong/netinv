@@ -135,6 +135,11 @@ class Workspace(object):
                               + roles.set_extra_rules(s.get('role_rules')))
         return self.rule_problems
 
+    def set_rules(self, kind_rules, role_rules):
+        def plain(rules):
+            return [list(r) if isinstance(r, tuple) else r for r in rules]
+        self._update_settings(kind_rules=plain(kind_rules), role_rules=plain(role_rules))
+
     def shared_serials(self):
         """Serials acknowledged as shared by different parts (a factory default serial)."""
         return list(self.settings().get('shared_serials') or [])
@@ -276,7 +281,7 @@ class Workspace(object):
         fresh, build_stats = build_devices(sections, nodes)
         created = created or _now()
         prev = self.load(network, raw=True)
-        devices = carry_forward(prev, fresh, created, self.keep_days())
+        devices = carry_forward(prev, fresh, created, self.keep_days(), self.shared_serials())
         devices = merge_manual(devices, [d for d in (prev or {}).get('devices', [])
                                          if d.get('source') == 'manual'])
         snap = {'format': 'netinv-snapshot-1', 'tool_version': VERSION, 'network': network,
@@ -376,15 +381,19 @@ def diff_snapshots(old, new):
         # built-in parts go with the chassis (and older snapshots did not list them)
         old_parts = {(p['kind'], p['name']): p['serial'] for p in a['hardware'] if p['kind'] != 'builtin'}
         new_parts = {(p['kind'], p['name']): p['serial'] for p in b['hardware'] if p['kind'] != 'builtin'}
+        # a serial still there under another kind or name (a newer version classifies it
+        # differently) is neither added nor removed
+        old_all = set(p['serial'] for p in a['hardware'])
+        new_all = set(p['serial'] for p in b['hardware'])
         for key in sorted(set(old_parts) | set(new_parts)):
             s1, s2 = old_parts.get(key), new_parts.get(key)
             if s1 == s2:
                 continue
             if s1 and s2:
                 out.append(('Hardware swapped', h, '%s: %s -> %s' % (key[1], s1, s2)))
-            elif s2 is not None and s1 is None:
+            elif s2 is not None and s1 is None and s2 not in old_all:
                 out.append(('Hardware added', h, '%s %s' % (key[1], s2)))
-            elif s1 is not None and s2 is None:
+            elif s1 is not None and s2 is None and s1 not in new_all:
                 out.append(('Hardware removed', h, '%s %s' % (key[1], s1)))
     return out
 

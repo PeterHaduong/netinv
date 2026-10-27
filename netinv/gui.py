@@ -14,8 +14,10 @@ stock, devices SolarWinds never reaches). Right, tabs:
   SolarWinds commands   the command list to paste into an NCM "Execute Command Script" job
 """
 
+import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -33,7 +35,8 @@ from .manual import template_sheets
 from .model import SHARED_WARNING, display_name, excluded_by, in_inventory, part_counts
 from .report import (workbook_for_networks, excluded_workbook, about_sheet, excluded_note,
                      device_kind, device_parts, feasibility_report)
-from .kinds import KIND_LABELS
+from .kinds import BOX_KINDS, KIND_LABELS, RULE_KINDS, compile_rule, rule_hits, rule_list
+from .roles import LABEL as ROLE_LABEL, compile_role_rule, role_from_hostname, role_label, role_name
 from .workspace import Workspace, diff_snapshots, safe_name
 from .xlsx import write_xlsx
 
@@ -67,6 +70,21 @@ def _start():
 def _px(widget, n):
     """n pixels at 100 % Windows display scaling -> pixels at the current scaling."""
     return int(round(n * max(1.0, widget.winfo_fpixels('1i') / 96.0)))
+
+
+def _wrap_to(container, label, less=0):
+    """Wrap the label's text to the container's width (minus less px) as the window resizes."""
+    container.bind('<Configure>', lambda e: label.config(wraplength=max(e.width - less, _px(label, 150))), add='+')
+
+
+def _fit_screen(win, width=None, frac_w=0.95, reserve_h=110):
+    """Size a window to what it asks for (or width px at 100 %, for one whose auto-sized tables
+    would ask for very wide), never more than the screen has (small screens, high scaling);
+    reserve_h: title bar + taskbar, in px at 100 %."""
+    win.update_idletasks()
+    w = min(_px(win, width) if width else win.winfo_reqwidth(), int(win.winfo_screenwidth() * frac_w))
+    h = min(win.winfo_reqheight(), win.winfo_screenheight() - _px(win, reserve_h))
+    win.geometry('%dx%d' % (w, h))
 
 
 class ImportDialog(tk.Toplevel):
@@ -198,9 +216,13 @@ class ExclusionDialog(tk.Toplevel):
             self.matches.heading(c, text=h)
             self.matches.column(c, width=_px(self, w))
         ms = ttk.Scrollbar(right, orient='vertical', command=self.matches.yview)
-        self.matches.configure(yscrollcommand=ms.set)
-        self.matches.pack(side='left', fill='both', expand=True)
-        ms.pack(side='right', fill='y')
+        mx = ttk.Scrollbar(right, orient='horizontal', command=self.matches.xview)
+        self.matches.configure(yscrollcommand=ms.set, xscrollcommand=mx.set)
+        self.matches.grid(row=0, column=0, sticky='nsew')
+        ms.grid(row=0, column=1, sticky='ns')
+        mx.grid(row=1, column=0, sticky='ew')
+        right.rowconfigure(0, weight=1)
+        right.columnconfigure(0, weight=1)
         self.count = ttk.Label(f, foreground='#555')
         self.count.grid(row=2, column=0, columnspan=2, sticky='w')
         bb = ttk.Frame(f)
@@ -223,12 +245,342 @@ class ExclusionDialog(tk.Toplevel):
         for name, rule in hits:
             self.matches.insert('', 'end', values=(name, rule))
         self.count.config(text='%d of %d devices excluded' % (len(hits), len(self.devices)))
+        self.app._autosize(self.matches, cap=700)
 
     def _save(self):
         self.app.ws.set_exclusions(self.network, self._rules())
         self.destroy()
         self.app.refresh_networks()
         self.app.set_status('Exclusion rules for %s saved' % self.network)
+
+
+class RulesDialog(tk.Toplevel):
+    """Local rules (settings.json): what kind an unknown part is, and the role of a model.
+    They are applied when the data is loaded - no re-import - and removing one undoes it.
+    Each tab lists the rules and previews what the selected (or typed) rule matches."""
+
+    FIELD_NAMES = (('pid', 'PID'), ('name', 'Inventory name'), ('descr', 'Description'),
+                   ('any', 'Name or description'))
+
+    def __init__(self, parent, app, pid=''):
+        tk.Toplevel.__init__(self, parent)
+        self.app = app
+        self.title('Part and role rules')
+        self.transient(parent)
+        settings = app.ws.settings()
+        # every entry is kept - one that cannot be used is listed as 'not valid' to fix or remove
+        self.kind_rules = [list(r) if isinstance(r, tuple) else r for r in rule_list(settings.get('kind_rules'), '')]
+        self.role_rules = [list(r) if isinstance(r, tuple) else r for r in rule_list(settings.get('role_rules'), '')]
+        self.parts, self.devices = [], []       # as parsed, before any local rule
+        for net in app.ws.networks():
+            snap = app.ws.load(net, raw=True)
+            for d in (snap or {}).get('devices', []):
+                self.devices.append((net, d))
+                self.parts += [(net, d, it) for it in d['hardware'] if it['kind'] not in BOX_KINDS]
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill='both', expand=True)
+        intro = ttk.Label(f, wraplength=_px(self, 700), justify='left', text=(
+            'Rules for hardware NetInv does not know yet. They are kept in inventory_data\\settings.json, '
+            'applied whenever data is loaded (no re-import) and listed on the workbook\'s About sheet. '
+            'Patterns are regular expressions: ^ = starts with, $ = ends with, . = any character. '
+            'The first matching rule wins.'))
+        intro.pack(fill='x')
+        _wrap_to(f, intro, _px(self, 24))
+        bb = ttk.Frame(f)                      # packed before the tabs: never squeezed out
+        bb.pack(side='bottom', fill='x')
+        ttk.Button(bb, text='Cancel', command=self.destroy).pack(side='right')
+        ttk.Button(bb, text='Save', command=self._save).pack(side='right', padx=4)
+        self.summary = ttk.Label(bb, foreground='#555')
+        self.summary.pack(side='left', fill='x', expand=True)
+        self.tabs = ttk.Notebook(f)
+        self.tabs.pack(fill='both', expand=True, pady=8)
+        self._build_kinds(pid)
+        self._build_roles()
+        self._fill_kinds()
+        self._fill_roles()
+        _fit_screen(self, width=980)
+        self.minsize(min(self.k_form.winfo_reqwidth() + _px(self, 40), self.winfo_screenwidth() - _px(self, 20)),
+                     _px(self, 420))
+        self.grab_set()
+        if pid:
+            self.k_pattern_entry.focus_set()
+
+    # ------------------------------------------------------------- shared pieces
+    def _table(self, parent, cols, heads, widths, height, stretch):
+        """Treeview with both scrollbars."""
+        box = ttk.Frame(parent)
+        tree = ttk.Treeview(box, columns=cols, show='headings', height=height,
+                            selectmode='browse' if height < 8 else 'none')
+        for c, h, w in zip(cols, heads, widths):
+            tree.heading(c, text=h)
+            tree.column(c, width=_px(self, w), minwidth=_px(self, 40), stretch=(c == stretch))
+        ys = ttk.Scrollbar(box, orient='vertical', command=tree.yview)
+        xs = ttk.Scrollbar(box, orient='horizontal', command=tree.xview)
+        tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        tree.grid(row=0, column=0, sticky='nsew')
+        ys.grid(row=0, column=1, sticky='ns')
+        xs.grid(row=1, column=0, sticky='ew')
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+        return box, tree
+
+    def _form_buttons(self, row, add, update, remove, move):
+        """Packed on the right before the pattern entry, so a narrow window shrinks the entry."""
+        b = ttk.Frame(row)
+        b.pack(side='right', padx=(8, 0))
+        ttk.Button(b, text='Add', command=add).pack(side='left')
+        ttk.Button(b, text='Update', command=update).pack(side='left', padx=2)
+        ttk.Button(b, text='Remove', command=remove).pack(side='left')
+        ttk.Button(b, text='▲', width=3, command=lambda: move(-1)).pack(side='left', padx=(6, 0))
+        ttk.Button(b, text='▼', width=3, command=lambda: move(1)).pack(side='left')
+
+    @staticmethod
+    def _picked(tree):
+        sel = tree.selection()
+        return tree.index(sel[0]) if sel else None
+
+    def _move(self, rules, tree, fill, step):
+        i = self._picked(tree)
+        if i is None or not 0 <= i + step < len(rules):
+            return
+        rules[i], rules[i + step] = rules[i + step], rules[i]
+        fill(select=i + step)
+
+    # ------------------------------------------------------------- part kinds
+    def _build_kinds(self, pid):
+        tab = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(tab, text='Part kinds')
+        box, self.k_tree = self._table(tab, ('kind', 'field', 'pattern', 'n'),
+                                       ('Kind', 'Matches on', 'Pattern', 'Parts'),
+                                       (170, 140, 260, 60), 5, 'pattern')
+        box.pack(fill='x')
+        self.k_tree.bind('<<TreeviewSelect>>', lambda e: self._kind_selected())
+        row = self.k_form = ttk.Frame(tab)
+        row.pack(fill='x', pady=(8, 0))
+        self.k_kind = tk.StringVar(value=KIND_LABELS['module'])
+        self.k_field = tk.StringVar(value=self.FIELD_NAMES[0][1])
+        self.k_pattern = tk.StringVar(value=('^%s$' % re.escape(pid).replace('\\-', '-')) if pid else '')
+        ttk.Combobox(row, textvariable=self.k_kind, state='readonly', width=24,
+                     values=[KIND_LABELS[k] for k in RULE_KINDS]).pack(side='left')
+        ttk.Combobox(row, textvariable=self.k_field, state='readonly', width=18,
+                     values=[n for _, n in self.FIELD_NAMES]).pack(side='left', padx=4)
+        self._form_buttons(row, self._kind_add, self._kind_update, self._kind_remove,
+                           lambda s: self._move(self.kind_rules, self.k_tree, self._fill_kinds, s))
+        self.k_pattern_entry = ttk.Entry(row, textvariable=self.k_pattern, width=24)
+        self.k_pattern_entry.pack(side='left', fill='x', expand=True)
+        for v in (self.k_kind, self.k_field, self.k_pattern):
+            v.trace_add('write', lambda *a: self._kind_preview())
+        self.k_error = ttk.Label(tab, foreground='#C00000')
+        self.k_error.pack(fill='x', pady=(2, 0))
+        ttk.Label(tab, text='Parts the pattern above matches (as NetInv classifies them):').pack(anchor='w', pady=(6, 2))
+        box, self.k_hits = self._table(tab, ('net', 'device', 'part', 'pid', 'descr', 'now'),
+                                       ('Network', 'Device', 'Inventory name', 'PID', 'Description', 'NetInv kind'),
+                                       (90, 150, 200, 150, 220, 130), 8, 'descr')
+        box.pack(fill='both', expand=True)
+
+    def _kind_form(self):
+        """The rule being typed, compiled, or None with the problem shown."""
+        kind = dict((v, k) for k, v in KIND_LABELS.items()).get(self.k_kind.get(), '')
+        field = dict((n, k) for k, n in self.FIELD_NAMES).get(self.k_field.get(), '')
+        rule = [kind, field, self.k_pattern.get().strip()]
+        try:
+            compile_rule(rule)
+        except (ValueError, re.error) as exc:
+            self.k_error.config(text=str(exc) if rule[2] else '')
+            return None
+        self.k_error.config(text='')
+        return rule
+
+    def _kind_preview(self):
+        self.k_hits.delete(*self.k_hits.get_children())
+        rule = self._kind_form()
+        if not rule:
+            return
+        r = compile_rule(rule)
+        for net, d, it in self.parts:
+            if rule_hits(r, it):
+                self.k_hits.insert('', 'end', values=(net, display_name(d), it['name'], it['pid'], it['descr'],
+                                                      KIND_LABELS.get(it['kind'], it['kind'])))
+        self.app._autosize(self.k_hits, stretch='descr')
+
+    def _fill_kinds(self, select=None):
+        self.k_tree.delete(*self.k_tree.get_children())
+        firsts = [0] * len(self.kind_rules)
+        compiled = []
+        for r in self.kind_rules:
+            try:
+                compiled.append(compile_rule(r))
+            except (ValueError, re.error, TypeError):
+                compiled.append(None)
+        for _, _, it in self.parts:                 # the first matching rule names the part
+            for i, c in enumerate(compiled):
+                if c and rule_hits(c, it):
+                    firsts[i] += 1
+                    break
+        for r, c, n in zip(self.kind_rules, compiled, firsts):
+            if c:
+                values = (KIND_LABELS[c[0]], dict(self.FIELD_NAMES)[c[1]], c[2].pattern, n)
+            else:
+                values = ('(not valid)', '', json.dumps(r), '-')
+            self.k_tree.insert('', 'end', values=values)
+        self.app._autosize(self.k_tree, cap=600, stretch='pattern')
+        kids = self.k_tree.get_children()
+        if select is not None and kids:
+            self.k_tree.selection_set(kids[min(select, len(kids) - 1)])
+        self._kind_preview()
+        self._summary()
+
+    def _kind_selected(self):
+        i = self._picked(self.k_tree)
+        if i is None:
+            return
+        r = self.kind_rules[i]
+        try:
+            compile_rule(r)
+        except (ValueError, re.error, TypeError):
+            return
+        self.k_kind.set(KIND_LABELS.get(r[0], r[0]))
+        self.k_field.set(dict(self.FIELD_NAMES).get(r[1], r[1]))
+        self.k_pattern.set(r[2])
+
+    def _kind_add(self):
+        rule = self._kind_form()
+        if rule and rule not in self.kind_rules:
+            self.kind_rules.append(rule)
+            self._fill_kinds(select=len(self.kind_rules) - 1)
+
+    def _kind_update(self):
+        i, rule = self._picked(self.k_tree), self._kind_form()
+        if i is not None and rule:
+            self.kind_rules[i] = rule
+            self._fill_kinds(select=i)
+
+    def _kind_remove(self):
+        i = self._picked(self.k_tree)
+        if i is not None:
+            del self.kind_rules[i]
+            self._fill_kinds(select=i)
+
+    # ------------------------------------------------------------- roles
+    def _build_roles(self):
+        tab = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(tab, text='Roles')
+        note = ttk.Label(tab, wraplength=_px(self, 680), justify='left', foreground='#555', text=(
+            'The Role column of the workbook\'s Devices sheet comes from the hostname first (AS = access, '
+            'LF = leaf ...). These rules give a role from the model when the hostname does not. '
+            'Pick a role or type your own.'))
+        note.pack(fill='x', pady=(0, 6))
+        _wrap_to(tab, note, _px(self, 20))
+        box, self.r_tree = self._table(tab, ('role', 'pattern', 'n'), ('Role', 'Model pattern', 'Devices'),
+                                       (200, 300, 70), 5, 'pattern')
+        box.pack(fill='x')
+        self.r_tree.bind('<<TreeviewSelect>>', lambda e: self._role_selected())
+        row = ttk.Frame(tab)
+        row.pack(fill='x', pady=(8, 0))
+        self.r_role = tk.StringVar()
+        self.r_pattern = tk.StringVar()
+        ttk.Combobox(row, textvariable=self.r_role, width=26,
+                     values=sorted(set(ROLE_LABEL.values()))).pack(side='left')
+        self._form_buttons(row, self._role_add, self._role_update, self._role_remove,
+                           lambda s: self._move(self.role_rules, self.r_tree, self._fill_roles, s))
+        ttk.Entry(row, textvariable=self.r_pattern, width=24).pack(side='left', padx=4, fill='x', expand=True)
+        for v in (self.r_role, self.r_pattern):
+            v.trace_add('write', lambda *a: self._role_preview())
+        self.r_error = ttk.Label(tab, foreground='#C00000')
+        self.r_error.pack(fill='x', pady=(2, 0))
+        ttk.Label(tab, text='Devices whose model the pattern above matches:').pack(anchor='w', pady=(6, 2))
+        box, self.r_hits = self._table(tab, ('net', 'device', 'model', 'now', 'result'),
+                                       ('Network', 'Device', 'Model', 'Role now', 'With this rule'),
+                                       (90, 170, 200, 160, 220), 8, 'result')
+        box.pack(fill='both', expand=True)
+
+    def _role_form(self):
+        role = self.r_role.get().strip()
+        role = dict((v, k) for k, v in ROLE_LABEL.items()).get(role, role)
+        rule = [role, self.r_pattern.get().strip()]
+        try:
+            if not rule[0] or not rule[1]:
+                raise ValueError('enter a role and a model pattern' if rule[0] or rule[1] else '')
+            re.compile(rule[1])
+        except (ValueError, re.error) as exc:
+            self.r_error.config(text=str(exc))
+            return None
+        self.r_error.config(text='')
+        return rule
+
+    def _role_preview(self):
+        self.r_hits.delete(*self.r_hits.get_children())
+        rule = self._role_form()
+        if not rule:
+            return
+        rx = re.compile(rule[1])
+        for net, d in self.devices:
+            if in_inventory(d) and rx.search(d['model'] or ''):
+                by_host = role_from_hostname(d['hostname'])
+                self.r_hits.insert('', 'end', values=(
+                    net, display_name(d), d['model'], role_label(d['hostname'], d['model']) or '-',
+                    ('%s (hostname wins)' % role_name(by_host)) if by_host else role_name(rule[0])))
+        self.app._autosize(self.r_hits, stretch='result')
+
+    def _fill_roles(self, select=None):
+        self.r_tree.delete(*self.r_tree.get_children())
+        for r in self.role_rules:
+            try:
+                role, rx = compile_role_rule(r)
+                n = sum(1 for _, d in self.devices if in_inventory(d) and rx.search(d['model'] or ''))
+                values = (role_name(role), rx.pattern, n)
+            except (ValueError, re.error, TypeError):
+                values = ('(not valid)', json.dumps(r), '-')
+            self.r_tree.insert('', 'end', values=values)
+        self.app._autosize(self.r_tree, cap=600, stretch='pattern')
+        kids = self.r_tree.get_children()
+        if select is not None and kids:
+            self.r_tree.selection_set(kids[min(select, len(kids) - 1)])
+        self._role_preview()
+        self._summary()
+
+    def _role_selected(self):
+        i = self._picked(self.r_tree)
+        try:
+            role, rx = compile_role_rule(self.role_rules[i]) if i is not None else (None, None)
+        except (ValueError, re.error, TypeError):
+            return
+        if role:
+            self.r_role.set(role_name(role))
+            self.r_pattern.set(rx.pattern)
+
+    def _role_add(self):
+        rule = self._role_form()
+        if rule and rule not in self.role_rules:
+            self.role_rules.append(rule)
+            self._fill_roles(select=len(self.role_rules) - 1)
+
+    def _role_update(self):
+        i, rule = self._picked(self.r_tree), self._role_form()
+        if i is not None and rule:
+            self.role_rules[i] = rule
+            self._fill_roles(select=i)
+
+    def _role_remove(self):
+        i = self._picked(self.r_tree)
+        if i is not None:
+            del self.role_rules[i]
+            self._fill_roles(select=i)
+
+    # ------------------------------------------------------------- save
+    def _summary(self):
+        if hasattr(self, 'summary'):
+            self.summary.config(text='%d part rule%s, %d role rule%s - not saved until you click Save'
+                                % (len(self.kind_rules), '' if len(self.kind_rules) == 1 else 's',
+                                   len(self.role_rules), '' if len(self.role_rules) == 1 else 's'))
+
+    def _save(self):
+        self.app.ws.set_rules(self.kind_rules, self.role_rules)
+        self.destroy()
+        self.app.refresh_networks()
+        problems = getattr(self.app.ws, 'rule_problems', None)
+        self.app.set_status('settings.json: ' + '; '.join(problems) if problems else
+                            'Rules saved: %d part, %d role' % (len(self.kind_rules), len(self.role_rules)))
 
 
 class App(object):
@@ -265,17 +617,17 @@ class App(object):
         style.configure('Treeview', indent=self.indent)
         w, h = self.px(1280), self.px(760)
         self.root.geometry('%dx%d' % (min(w, int(self.root.winfo_screenwidth() * 0.95)),
-                                      min(h, int(self.root.winfo_screenheight() * 0.9))))
+                                      min(h, self.root.winfo_screenheight() - self.px(110))))
 
     def px(self, n):
         """n pixels at 100 % scaling -> pixels at the current scaling."""
         return int(round(n * self.scale))
 
-    def _autosize(self, tree, cap=380, wide_cap=None, max_rows=4000, stretch=None):
+    def _autosize(self, tree, cap=380, wide_cap=None, max_rows=4000, stretch=None, names=(), name_cap=700):
         """Fit each column to its heading and contents (measured with the fonts in use).
         The stretch column (default: the last - notes / details) is as wide as its longest text
         (wide_cap: limit it), so the horizontal scrollbar reaches the end; it also takes up the
-        rest of the window."""
+        rest of the window. names: columns holding device names, allowed up to name_cap."""
         cols = list(tree['columns'])
         has_tree = 'tree' in str(tree.cget('show'))
         pad = self.px(18)
@@ -300,12 +652,14 @@ class App(object):
             todo.extend((child, depth + 1) for child in tree.get_children(iid))
         last = stretch or (cols[-1] if cols else None)
         for c, w in widths.items():
-            limit = wide_cap if c == last else cap
+            limit = wide_cap if c == last else (name_cap if c in names else cap)
             tree.column(c, width=w if limit is None else min(w, self.px(limit)), stretch=(c == last))
 
     def _build(self):
         # Left panel packed first so it always keeps its width; the tabs take the rest (the
         # auto-sized tables can ask for more than the window has and scroll instead).
+        self.status = ttk.Label(self.root, text='Ready', anchor='w', padding=(8, 2))
+        self.status.pack(fill='x', side='bottom')        # before the body: never squeezed out
         body = ttk.Frame(self.root)
         body.pack(fill='both', expand=True)
         left = ttk.Frame(body, padding=8)
@@ -322,6 +676,7 @@ class App(object):
         self.netlist.pack(fill='both', expand=True, pady=4)
         self.netlist.bind('<Button-1>', self._net_click)
         self.netlist.bind('<Double-1>', self._net_only)
+        self.netlist.bind('<<TreeviewSelect>>', lambda e: self._show_netinfo())
         self.netlist.bind('<space>', lambda e: self.toggle_network(self._current()))
         move = ttk.Frame(left)
         move.pack(fill='x')
@@ -348,8 +703,6 @@ class App(object):
         self._build_changes()
         self._build_outputs()
         self._build_commands()
-        self.status = ttk.Label(self.root, text='Ready', anchor='w', padding=(8, 2))
-        self.status.pack(fill='x', side='bottom')
 
     def _build_inventory(self):
         tab = ttk.Frame(self.tabs, padding=6)
@@ -358,23 +711,21 @@ class App(object):
         bar.pack(fill='x')
         ttk.Label(bar, text='Search').pack(side='left')
         self.search = tk.StringVar()
-        e = ttk.Entry(bar, textvariable=self.search, width=40)
+        e = ttk.Entry(bar, textvariable=self.search, width=30)
         e.pack(side='left', padx=6)
         e.bind('<KeyRelease>', lambda ev: self.fill_inventory())
         ttk.Button(bar, text='Expand all', command=lambda: self._expand(True)).pack(side='left', padx=2)
         ttk.Button(bar, text='Collapse all', command=lambda: self._expand(False)).pack(side='left', padx=2)
+        ttk.Button(bar, text='Exclusion rules...', command=self.do_exclusion_rules).pack(side='left', padx=(12, 2))
         self.inv_count = ttk.Label(bar, text='')
         self.inv_count.pack(side='right')
         acts = ttk.Frame(tab)                    # second row: what to do with the selected device(s)
         acts.pack(fill='x', pady=(4, 0))
         ttk.Label(acts, text='Selected device:').pack(side='left')
-        self.excl_button = ttk.Button(acts, text='Exclude selected device', width=24,
-                                      command=self.do_exclude_selected)
+        self.excl_button = ttk.Button(acts, text='Exclude selected device', command=self.do_exclude_selected)
         self.excl_button.pack(side='left', padx=(6, 2))
         ttk.Button(acts, text='Forget (gone for good)...', command=self.do_forget).pack(side='left', padx=2)
-        ttk.Button(acts, text='Exclusion rules...', command=self.do_exclusion_rules).pack(side='left', padx=(12, 2))
-        self.shared_button = ttk.Button(acts, text='Mark serial as shared/default', width=30,
-                                        command=self.do_shared_serial)
+        self.shared_button = ttk.Button(acts, text='Mark serial as shared/default', command=self.do_shared_serial)
         self.shared_button.pack(side='left', padx=(12, 2))
         cols = ('kind', 'model', 'serial', 'uplink', 'software', 'status', 'ip', 'location', 'notes')
         heads = ('Kind', 'Model / PID', 'Serial', 'Uplink module', 'Software', 'Status / role',
@@ -395,6 +746,7 @@ class App(object):
         self.tree.tag_configure('excluded', foreground='#808080')
         self.tree.tag_configure('group', foreground='#808080', font=self.font_group)
         self.tree.bind('<<TreeviewSelect>>', lambda e: self._update_exclude_button())
+        self.tree.bind('<Double-1>', self._tree_double)
         ys = ttk.Scrollbar(frame, orient='vertical', command=self.tree.yview)
         xs = ttk.Scrollbar(frame, orient='horizontal', command=self.tree.xview)
         self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
@@ -472,9 +824,14 @@ class App(object):
             ('Sanitized summary', 'Counts only - no hostnames, IPs, serials (for parser troubleshooting)', self.do_summary),
             ('Open output folder', '', lambda: self._open_out()),
         ]
+        hints = []
         for i, (label, hint, cmd) in enumerate(actions):
-            ttk.Button(tab, text=label, width=22, command=cmd).grid(row=2 + i, column=0, sticky='w', pady=4)
-            ttk.Label(tab, text=hint, foreground='#555').grid(row=2 + i, column=1, columnspan=2, sticky='w')
+            b = ttk.Button(tab, text=label, width=22, command=cmd)
+            b.grid(row=2 + i, column=0, sticky='w', pady=4)
+            hints.append(ttk.Label(tab, text=hint, foreground='#555', justify='left'))
+            hints[-1].grid(row=2 + i, column=1, columnspan=2, sticky='w')
+        tab.bind('<Configure>', lambda e: [h.config(wraplength=max(e.width - b.winfo_reqwidth() - self.px(40),
+                                                                   self.px(150))) for h in hints], add='+')
         opts = ttk.LabelFrame(tab, text='Settings', padding=8)
         opts.grid(row=2 + len(actions), column=0, columnspan=3, sticky='we', pady=(16, 0))
         self.optics = tk.BooleanVar(value=self.ws.include_optics())
@@ -482,35 +839,48 @@ class App(object):
                         variable=self.optics, command=self.do_optics).grid(row=0, column=0, columnspan=4, sticky='w')
         days = self.ws.settings().get('keep_unreached_days', DEFAULT_KEEP_DAYS)
         self.keep_days = tk.StringVar(value='' if days is None else str(days))
-        ttk.Label(opts, text='Devices SolarWinds cannot reach keep their last known hardware for').grid(
+        ttk.Label(opts, text='Devices SolarWinds cannot reach keep their last known hardware for:').grid(
             row=1, column=0, sticky='w', pady=(6, 0))
-        ttk.Entry(opts, textvariable=self.keep_days, width=6).grid(row=1, column=1, padx=4, pady=(6, 0))
-        ttk.Label(opts, text='days (blank = until you forget them)').grid(row=1, column=2, sticky='w', pady=(6, 0))
-        ttk.Button(opts, text='Save', command=self.do_save_keep).grid(row=1, column=3, padx=8, pady=(6, 0))
+        keep = ttk.Frame(opts)
+        keep.grid(row=2, column=0, sticky='w', pady=(2, 0))
+        ttk.Entry(keep, textvariable=self.keep_days, width=6).pack(side='left')
+        ttk.Label(keep, text='days (blank = until you forget them)').pack(side='left', padx=6)
+        ttk.Button(keep, text='Save', command=self.do_save_keep).pack(side='left', padx=4)
+        rules = ttk.Frame(opts)
+        rules.grid(row=3, column=0, sticky='w', pady=(10, 0))
+        ttk.Button(rules, text='Part / role rules...', command=lambda: self.do_rules()).pack(side='left')
+        ttk.Label(rules, foreground='#555', text='name parts and models NetInv does not know yet').pack(
+            side='left', padx=6)
         tab.columnconfigure(1, weight=1)
 
     def _build_commands(self):
         tab = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(tab, text='SolarWinds commands')
-        ttk.Label(tab, wraplength=self.px(760), justify='left', text=(
+        intro = ttk.Label(tab, wraplength=self.px(760), justify='left', text=(
             'Paste this list into a SolarWinds NCM "Execute Command Script" job (or a scheduled '
             'command-script job) and run it against every device. It is one list for all '
             'platforms: a device that does not support a command (e.g. "show module" on a C8300, '
             '"show fex" on IOS) answers with an error, and NetInv skips that section. It starts '
             'with "terminal length 0" and has a "!" line between commands, so it can also be pasted '
-            'into an SSH session by hand without a command being lost.')).pack(anchor='w')
+            'into an SSH session by hand without a command being lost.'))
+        intro.pack(anchor='w', fill='x')
+        _wrap_to(tab, intro, self.px(30))
         body = ttk.Frame(tab)
         body.pack(fill='both', expand=True, pady=8)
         left = ttk.Frame(body)
         left.pack(side='top', fill='x')
         self.cmd_vars = []
-        for cmd, why, where, on in CATALOG:
+        descs, boxes = [], []
+        for i, (cmd, why, where, on) in enumerate(CATALOG):
             v = tk.BooleanVar(value=on)
             self.cmd_vars.append((cmd, v))
-            row = ttk.Frame(left)
-            row.pack(fill='x', pady=1)
-            ttk.Checkbutton(row, text=cmd, variable=v, command=self._refresh_script, width=50).pack(side='left')
-            ttk.Label(row, text='%s  [%s]' % (why, where), foreground='#555').pack(side='left')
+            boxes.append(ttk.Checkbutton(left, text=cmd, variable=v, command=self._refresh_script))
+            boxes[-1].grid(row=i, column=0, sticky='nw', pady=1)
+            descs.append(ttk.Label(left, text='%s  [%s]' % (why, where), foreground='#555', justify='left'))
+            descs[-1].grid(row=i, column=1, sticky='w', padx=(8, 0), pady=1)
+        left.columnconfigure(1, weight=1)
+        left.bind('<Configure>', lambda e: [d.config(wraplength=max(
+            e.width - max(b.winfo_reqwidth() for b in boxes) - self.px(20), self.px(150))) for d in descs])
         right = ttk.Frame(body)
         right.pack(side='top', fill='both', expand=True, pady=(10, 0))
         ttk.Label(right, text='Script to paste:').pack(anchor='w')
@@ -595,22 +965,31 @@ class App(object):
         self.show_selected()
 
     def show_selected(self):
-        nets = self.selected_networks()
-        info = []
-        for n in nets:
-            s = self.snaps.get(n)
-            if s:
-                excl = len(s.get('excluded', []))
-                info.append('%s: %d devices%s, imported %s (%d snapshot%s)'
-                            % (n, sum(1 for d in s['devices'] if in_inventory(d)),
-                               (' (%d excluded)' % excl) if excl else '', s['created'][:16],
-                               len(self.ws.snapshots(n)), '' if len(self.ws.snapshots(n)) == 1 else 's'))
-        self.netinfo.config(text='\n'.join(info) or (
-            'No networks ticked.' if self.order else 'No networks yet - click "Import SolarWinds output...".'))
+        self._show_netinfo()
         self.fill_inventory()
         self.fill_counts()
         self.fill_issues()
         self.fill_changes()
+
+    def _show_netinfo(self):
+        """The ticked networks under the list; with more than 3, one summary line plus the
+        picked network, so the panel keeps its buttons."""
+        lines = {}
+        for n in self.selected_networks():
+            s = self.snaps[n]
+            excl, count = len(s.get('excluded', [])), len(self.ws.snapshots(n))
+            lines[n] = ('%s: %d devices%s, imported %s (%d snapshot%s)'
+                        % (n, sum(1 for d in s['devices'] if in_inventory(d)),
+                           (' (%d excluded)' % excl) if excl else '', s['created'][:16],
+                           count, '' if count == 1 else 's'))
+        info = [lines[n] for n in self.selected_networks()]
+        if len(info) > 3:
+            total = sum(sum(1 for d in self.snaps[n]['devices'] if in_inventory(d)) for n in lines)
+            info = ['%d networks ticked, %d devices in all.' % (len(lines), total)]
+            if self._current() in lines:
+                info.append(lines[self._current()])
+        self.netinfo.config(text='\n'.join(info) or (
+            'No networks ticked.' if self.order else 'No networks yet - click "Import SolarWinds output...".'))
 
     def _tree_state(self):
         """What the user has open / selected / scrolled to, by (network, device key), so a
@@ -715,7 +1094,7 @@ class App(object):
                     self.tree.delete(gid)
                     del self.group_rows[gid]
         self.inv_count.config(text='%d devices shown' % shown)
-        self._autosize(self.tree)
+        self._autosize(self.tree, names=('#0',))
         if same_view:
             if not reselect:                  # the selected device was forgotten / (ex/in)cluded:
                 for nid in self.tree.get_children():      # pick the one now in its place
@@ -792,7 +1171,7 @@ class App(object):
             for d in sorted(self.snaps.get(net, {}).get('devices', []), key=display_name):
                 for w in d['warnings']:
                     self.issues.insert('', 'end', values=(net, display_name(d), w))
-        self._autosize(self.issues)
+        self._autosize(self.issues, names=('Device',))
 
     def _changes_for(self, nets):
         """{network: (compared-with date, [(change, host, detail)])}"""
@@ -816,7 +1195,7 @@ class App(object):
                 continue
             for change, host, detail in rows or [('(no changes)', '', '')]:
                 self.changes.insert('', 'end', values=(net, since, change, host, detail))
-        self._autosize(self.changes)
+        self._autosize(self.changes, names=('Device',))
 
     # ------------------------------------------------------------------ actions
     def set_status(self, text):
@@ -1004,6 +1383,19 @@ class App(object):
         self.set_status('; '.join('%s %s' % (k.capitalize(), _some(v)) for k, v in done.items() if v)
                         + ('  - to undo, select them in the network\'s "Excluded" branch' if done['excluded'] else ''))
 
+    def _tree_double(self, event):
+        """Double-click on an Unrecognised part: open the rules with its PID filled in."""
+        iid = self.tree.identify_row(event.y)
+        if not iid or iid in self.dev_rows or iid not in self.inv_nodes:
+            return None
+        if self.tree.set(iid, 'kind') != KIND_LABELS['other']:
+            return None
+        self.do_rules(self.tree.set(iid, 'model'))
+        return 'break'
+
+    def do_rules(self, pid=''):
+        RulesDialog(self.root, self, pid)
+
     def do_exclusion_rules(self):
         net = self._current() or (self.selected_networks() or [None])[0]
         if not net:
@@ -1070,8 +1462,10 @@ class App(object):
             return
         path = os.path.join(self._outdir(), 'inventory_%s.xlsx' % ('_'.join(nets) if len(nets) <= 3 else 'all'))
         data = [(n, self.snaps[n]['devices']) for n in nets]
+        settings = self.ws.settings()
         about = about_sheet([(n, self.snaps[n]) for n in nets], self.ws.include_optics(),
-                            shared_serials=self.ws.shared_serials())
+                            shared_serials=self.ws.shared_serials(),
+                            kind_rules=settings.get('kind_rules'), role_rules=settings.get('role_rules'))
         compared = self._changes_for(nets)
         changes = dict((n, rows) for n, (_, rows) in compared.items())
         baselines = dict((n, since) for n, (since, _) in compared.items())

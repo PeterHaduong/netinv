@@ -89,6 +89,8 @@ def main(argv=None):
         return 0
 
     ws = Workspace(args.workspace)
+    for problem in ws.use_rules():
+        sys.stderr.write('settings.json: %s (ignored)\n' % problem)
     if args.cmd == 'commands':
         sys.stdout.write(script_text([c for c, _, _, _ in CATALOG] if args.all else default_commands()))
     elif args.cmd == 'import':
@@ -109,7 +111,7 @@ def main(argv=None):
     elif args.cmd == 'manual-sheet':
         from netinv.manual import template_sheets
         from netinv.xlsx import write_xlsx
-        write_xlsx(args.out, template_sheets([(n, ws.load(n)['devices']) for n in args.networks]))
+        write_xlsx(args.out, template_sheets([(n, ws.load(n, raw=True)['devices']) for n in args.networks]))
         print('Wrote', args.out)
     elif args.cmd == 'forget':
         print('Forgot: %s' % (', '.join(ws.forget(args.network, args.hostnames)) or 'nothing'))
@@ -151,7 +153,9 @@ def main(argv=None):
             write_xlsx(args.out, workbook_for_networks(
                 [(n, snaps[n]['devices']) for n in nets],
                 about=about_sheet([(n, snaps[n]) for n in nets], ws.include_optics(),
-                                  shared_serials=ws.shared_serials())))
+                                  shared_serials=ws.shared_serials(),
+                                  kind_rules=ws.settings().get('kind_rules'),
+                                  role_rules=ws.settings().get('role_rules'))))
         print('Wrote', args.out)
     return 0
 

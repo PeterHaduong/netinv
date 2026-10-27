@@ -175,7 +175,8 @@ def read_manual(path, default_network=''):
         if any(it['serial'] == serial for it in d['hardware']):
             d['warnings'].append('Row %d: serial %s is listed twice - kept once' % (n, serial))
             continue
-        item = {'kind': kind, 'name': unit or pid, 'descr': descr, 'pid': pid, 'vid': '',
+        item = {'kind': kind, 'kind_given': bool(kind_text and _KIND_WORDS.get(kind_text.lower())),
+                'name': unit or pid, 'descr': descr, 'pid': pid, 'vid': '',
                 'serial': serial, 'status': '', 'sw': '', 'notes': get(row, 'notes'), 'row': n,
                 'role': get(row, 'status') or ('Spare' if d['stock'] else 'Installed'),
                 'slot': slot_of({'name': unit}), 'member': member_of({'name': unit})}
@@ -207,7 +208,7 @@ def _kind_from_pid(unit, descr, pid):
     kind = kind_of({'name': unit, 'descr': descr, 'pid': pid})
     if kind in dict((k, 1) for _, k in KIND_CHOICES) and kind != 'other':
         return kind
-    role = role_from_model(pid)
+    role = role_from_model(pid, local=False)       # stored in the snapshot: no local rules
     if role in ('access', 'sw'):
         return 'stack_member'
     return 'chassis' if role else 'other'

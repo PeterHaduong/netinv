@@ -34,13 +34,14 @@ def reached(d):
     return 'collection error' not in d['commands'] and bool(d['hardware'] or d['serial'] or d.get('vdc_of'))
 
 
-def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
+def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS, shared_serials=()):
     """fresh: SolarWinds devices from this import. Returns the device list with devices that
     were not reached replaced by (or added as) their last known record. created: this import's
     timestamp 'YYYY-MM-DD HH:MM:SS'. keep_days None = keep forever, 0 = never keep.
 
     A device collected earlier in this round (within ROUND_GAP_DAYS, e.g. by the first job when
-    this import is a retry of the failures) is carried as current ('carried'), not as unreached."""
+    this import is a retry of the failures) is carried as current ('carried'), not as unreached.
+    shared_serials: acknowledged default serials - never evidence that two records are one box."""
     today = _day(created)
     for d in fresh:
         d['carried'] = False
@@ -48,6 +49,15 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
             d['last_seen'] = today
     if not prev:
         return list(fresh)
+    # a part serial is evidence only when it is unique: not acknowledged as shared, and not on
+    # two devices of the same import (a default serial)
+    weak = set(shared_serials or ())
+    for devs in (fresh, prev['devices']):
+        seen = {}
+        for d in devs:
+            for sn in _part_serials(d):
+                seen.setdefault(sn, set()).add(d['key'])
+        weak |= set(sn for sn, keys in seen.items() if len(keys) > 1)
     by_key = dict((d['key'], d) for d in fresh)
     by_ip = {}
     for d in fresh:
@@ -58,7 +68,7 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
         if reached(d):
             for sn in _box_serials(d):
                 owned[sn] = d
-            for sn in _part_serials(d):
+            for sn in _part_serials(d) - weak:
                 owned_parts.setdefault(sn, d)
     now = datetime.datetime.strptime(today, '%Y-%m-%d')
     out = [d for d in fresh]
@@ -66,7 +76,7 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
         if p.get('source', 'SolarWinds') != 'SolarWinds' or not in_inventory(p):
             continue
         cur = by_key.get(p['key'])
-        if cur is not None and _other_box(cur, p):
+        if cur is not None and _other_box(cur, p, weak):
             # the caption now names another box (e.g. a second SolarWinds instance lists it
             # without its note): follow this box by its IP address instead
             cur = by_ip.get(p.get('mgmt_ip'))
@@ -80,7 +90,7 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
         if p['serial']:
             holder = owned.get(p['serial'].split(' / ')[0])
         else:                                    # no box serial: any of its parts' serials
-            holder = next((owned_parts[s] for s in sorted(_part_serials(p)) if s in owned_parts), None)
+            holder = _part_holder(p, owned_parts, weak)
         if holder is not None and (norm_host(holder['hostname']) == norm_host(p['hostname'])
                                    or (holder.get('mgmt_ip') and holder['mgmt_ip'] == p.get('mgmt_ip'))):
             continue    # the same box, collected now under another name (e.g. another SolarWinds)
@@ -114,7 +124,44 @@ def carry_forward(prev, fresh, created, keep_days=DEFAULT_KEEP_DAYS):
     return out
 
 
-def _other_box(cur, p):
+def _part_holder(p, owned_parts, weak):
+    """The fresh device that is p's box by its parts (see _same_by_parts), or None."""
+    hits = {}
+    for sn in _part_serials(p) - weak:
+        if sn in owned_parts:
+            hits.setdefault(owned_parts[sn]['key'], owned_parts[sn])
+    for d in hits.values():
+        if _same_by_parts(d, p, weak):
+            return d
+    return None
+
+
+def _same_by_parts(x, y, weak=()):
+    """Two records, at least one without a box serial: the same box only when the parts agree -
+    two or more serials in common (default serials left out), a box serial on either side found
+    among the other's parts, and no part number fitted once on each side with two different
+    serials. Otherwise they are kept apart: listed twice at worst, never one box lost."""
+    weak = set(weak)
+    px, py = _part_serials(x) - weak, _part_serials(y) - weak
+    for box, other in ((_box_serials(x), py), (_box_serials(y), px)):
+        if box and not (box & other):
+            return False
+    if len(px & py) < 2:
+        return False
+    once_x, once_y = _single_pids(x, weak), _single_pids(y, weak)
+    return not any(once_x[pid] != once_y[pid] for pid in set(once_x) & set(once_y))
+
+
+def _single_pids(d, weak):
+    """{PID: serial} for part numbers fitted exactly once in the box."""
+    seen = {}
+    for it in d.get('hardware') or ():
+        if it.get('serial') and it['serial'] not in weak and it['kind'] != 'transceiver' and it.get('pid'):
+            seen.setdefault(it['pid'], []).append(it['serial'])
+    return dict((pid, sns[0]) for pid, sns in seen.items() if len(sns) == 1)
+
+
+def _other_box(cur, p, weak=()):
     """Is the fresh device under p's caption a different box: other IP and no serial in common?
     The box serials decide; when either side has none (a model whose chassis was not
     recognised), any part serial in common - a module, a DSP, a built-in port - means the same
@@ -124,7 +171,7 @@ def _other_box(cur, p):
     a, b = _box_serials(cur), _box_serials(p)
     if a and b:
         return not (a & b)
-    return not (_part_serials(cur) & _part_serials(p))
+    return not _same_by_parts(cur, p, weak)
 
 
 def _box_serials(d):

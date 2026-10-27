@@ -32,7 +32,7 @@ MODEL_RULES = [
     ('spine', r'^N9K-C95'),
     ('leaf', r'^N9K-C93'),
     ('dist', r'^(C94\d\dR?|C9500)'),
-    ('access', r'^C93\d\d'),                # C9300, C9300X/L, C9350
+    ('access', r'^C93\d\d[A-Z]{0,2}-\d'),     # C9300-48P, C9300X-48HX, C9350-48P (not C9300-SSD-...)
     ('sw', r'^(C9200|C38\d\d|WS-C|C1000)'),
 ]
 
@@ -48,15 +48,40 @@ def set_extra_rules(rules):
     """Rules from settings.json "role_rules": [[role, model regex], ...], e.g. ["access",
     "^C9350"], checked before MODEL_RULES (the hostname still wins). role is one of LABEL's
     keys or any other text, which is then shown as the label. Returns a list of problems."""
+    from .kinds import rule_list
     good, problems = [], []
-    for r in rules or []:
+    for r in rule_list(rules, 'role_rules', problems):
         try:
-            role, rx = r
-            good.append((str(role), re.compile(rx)))
+            good.append(compile_role_rule(r))
         except (TypeError, ValueError, re.error) as exc:
             problems.append('role_rules %r: %s' % (r, exc))
     _EXTRA[:] = good
     return problems
+
+
+def compile_role_rule(r):
+    """[role, model regex] -> (role, compiled). Raises ValueError / re.error."""
+    if not isinstance(r, (list, tuple)) or len(r) != 2:
+        raise ValueError('a rule is [role, model pattern]')
+    role, rx = r
+    if not isinstance(role, str) or not role.strip():
+        raise ValueError('empty role')
+    if not isinstance(rx, str) or not rx.strip():
+        raise ValueError('empty pattern')
+    return (role.strip(), re.compile(rx))
+
+
+def valid_rules(rules):
+    """The role_rules entries that are actually applied (for the About sheet)."""
+    from .kinds import rule_list
+    out = []
+    for r in rule_list(rules, 'role_rules'):
+        try:
+            compile_role_rule(r)
+            out.append(list(r))
+        except (TypeError, ValueError, re.error):
+            pass
+    return out
 
 
 def tokens(hostname):
@@ -72,11 +97,16 @@ def role_from_hostname(hostname):
     return ''
 
 
-def role_from_model(model):
-    for role, rx in _EXTRA + MODEL_RULES:
+def role_from_model(model, local=True):
+    """local=False: the built-in MODEL_RULES only (for decisions stored in a snapshot)."""
+    for role, rx in (_EXTRA if local else []) + MODEL_RULES:
         if re.search(rx, model or ''):
             return role
     return ''
+
+
+def role_name(role):
+    return LABEL.get(role, role) if isinstance(role, str) else str(role)
 
 
 def role_label(hostname, model=''):

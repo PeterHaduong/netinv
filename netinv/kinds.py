@@ -4,8 +4,9 @@ Rules are plain data, checked top to bottom; the first match wins. Part-number
 (PID) rules come before description keywords because descriptions mislead, e.g.
 a C9400-LC-24XS line card's description contains "(SFP+)".
 
-Extra rules can be added without editing this file: settings.json "kind_rules" (see
-set_extra_rules). They are checked before the built-in ones.
+Local rules can be added without editing this file: settings.json "kind_rules" (the app's
+Rules... dialog, see set_extra_rules). They are applied when a snapshot is loaded, so the stored
+data always holds this file's classification and removing a rule undoes it.
 """
 
 import re
@@ -73,35 +74,80 @@ RULES = [
 ]
 _COMPILED = [(kind, field, re.compile(rx)) for kind, field, rx in RULES]
 _EXTRA = []
-_FIELDS = ('name', 'descr', 'pid', 'any')
+FIELDS = ('pid', 'name', 'descr', 'any')
+# What a local rule may make a part. Never chassis / stack member / FEX: which box is which
+# is decided by the parser, a rule only names parts.
+RULE_KINDS = ('supervisor', 'linecard', 'fabric', 'sysctrl', 'module', 'power', 'fan',
+              'transceiver', 'builtin', 'other')
+BOX_KINDS = ('chassis', 'stack_member', 'fex', 'stack')
 
 
 def set_extra_rules(rules):
     """Rules from settings.json "kind_rules": [[kind, field, regex], ...], e.g.
-    ["power", "pid", "^C9350-PWR"]. They are checked before the built-in rules. Returns a
-    list of problems (bad entries are skipped)."""
+    ["power", "pid", "^C9350-PWR"]. Checked before the built-in rules, for parts only (see
+    RULE_KINDS). Returns a list of problems (bad entries are skipped)."""
     good, problems = [], []
-    for r in rules or []:
+    for r in rule_list(rules, 'kind_rules', problems):
         try:
-            kind, field, rx = r
-            if kind not in KIND_LABELS or field not in _FIELDS:
-                raise ValueError('kind must be one of %s, field one of %s'
-                                 % (', '.join(k for k in KIND_ORDER), ', '.join(_FIELDS)))
-            good.append((kind, field, re.compile(rx)))
+            good.append(compile_rule(r))
         except (TypeError, ValueError, re.error) as exc:
             problems.append('kind_rules %r: %s' % (r, exc))
     _EXTRA[:] = good
     return problems
 
 
+def rule_list(rules, name, problems=None):
+    """The settings value as a list ('kind_rules': 5 or a string is a mistake, not a crash)."""
+    if rules in (None, ''):
+        return []
+    if not isinstance(rules, list):
+        if problems is not None:
+            problems.append('%s must be a list of rules, not %r' % (name, rules))
+        return []
+    return rules
+
+
+def valid_rules(rules):
+    """The kind_rules entries that are actually applied (for the About sheet)."""
+    out = []
+    for r in rule_list(rules, 'kind_rules'):
+        try:
+            compile_rule(r)
+            out.append(list(r))
+        except (TypeError, ValueError, re.error):
+            pass
+    return out
+
+
+def compile_rule(r):
+    """[kind, field, regex] -> (kind, field, compiled). Raises ValueError / re.error."""
+    if not isinstance(r, (list, tuple)) or len(r) != 3:
+        raise ValueError('a rule is [kind, field, pattern]')
+    kind, field, rx = r
+    if not isinstance(kind, str) or kind not in RULE_KINDS:
+        raise ValueError('kind must be one of %s' % ', '.join(RULE_KINDS))
+    if not isinstance(field, str) or field not in FIELDS:
+        raise ValueError('field must be one of %s' % ', '.join(FIELDS))
+    if not isinstance(rx, str) or not rx.strip():
+        raise ValueError('empty pattern')
+    return (kind, field, re.compile(rx))
+
+
+def rule_hits(rule, item):
+    """Does one compiled rule match this item?"""
+    return _match([rule], item) is not None
+
+
 def extra_kind(item):
-    """The kind from the settings rules only, or ''."""
+    """The kind from the settings rules, or '' (none matches, or the item is a box)."""
+    if item.get('kind') in BOX_KINDS:
+        return ''
     return _match(_EXTRA, item) or ''
 
 
 def kind_of(item):
     """Return the kind for one inventory item dict (name/descr/pid)."""
-    return _match(_EXTRA, item) or _match(_COMPILED, item) or 'other'
+    return _match(_COMPILED, item) or 'other'
 
 
 def _match(rules, item):

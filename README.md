@@ -135,10 +135,13 @@ times as needed), and import the manual sheet. Imports less than 30 days apart a
 * **New hardware.** The box is found without knowing the model: the inventory line carrying
   show version's serial is the chassis, whatever it is called. A part whose kind is not known
   is still listed and counted (Kind: Unrecognised) and named on the Issues sheet. To name it,
-  add a rule to `inventory_data/settings.json` - no code change, no re-import:
-  `"kind_rules": [["power", "pid", "^C9350-PWR"]]` (kind, field `pid`/`name`/`descr`/`any`,
-  regex) and, for the Role column, `"role_rules": [["access", "^C9350"]]` (the hostname still
-  wins). A rule that cannot be read is named in the status bar.
+  double-click the part on the Inventory tab (or **Outputs -> Settings -> Part / role rules...**)
+  and add a rule, e.g. PID matching `^C9350-PWR` -> Power supply. The dialog shows what each
+  rule matches before you save. The **Roles** tab does the same for the Role column from the
+  model (the hostname still wins). Rules only name parts - they never change which box is which;
+  they apply on load (no re-import), removing one undoes it, and the workbook's About sheet
+  lists them. They are kept in `inventory_data/settings.json` as `"kind_rules"` and
+  `"role_rules"`.
 * **Part counts** has one row per PID with a Total and a column per network. Each physical part
   is counted once by serial number: a dual-homed FEX (listed under both parent leafs) or a
   Nexus 7700 shared by several VDCs counts as one. Built-in parts (a chassis' own route

@@ -60,7 +60,27 @@ def short_host(name):
     return name if is_ipv4(name) else name.split('.')[0]
 
 
-_IPV6 = re.compile(r'^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,7}$')
+_IPV6 = re.compile(r'^[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:\d{1,3}(?:\.\d{1,3}){3})?(?:%[\w/.:-]+)?(?=\s|$|[(\[{<"-])')
+_CAPTION_REST = re.compile(r'^\s*(.*?)\s*$')
+
+
+def _ipv6_prefix(text):
+    """The IPv6 address at the start of text (match object) or None. 'DC1:A:B' is not one:
+    an address has '::' or all eight groups (seven colons; six with a dotted IPv4 tail)."""
+    m = _IPV6.match(text)
+    if not m:
+        return None
+    addr = m.group(0).split('%')[0]
+    if '::' in addr or addr.count(':') >= (6 if '.' in addr else 7):
+        return m
+    return None
+
+
+def is_ip(text):
+    """An IPv4 or IPv6 address (the whole text)."""
+    text = (text or '').strip()
+    m = _ipv6_prefix(text)
+    return is_ipv4(text) or bool(m and m.end() == len(text))
 _CAPTION = re.compile(r'^\s*([A-Za-z0-9][\w.\-]*)\s*(.*?)\s*$')
 
 
@@ -68,15 +88,20 @@ def split_caption(caption):
     """A SolarWinds node caption -> (hostname, note). Ambiguous hostnames get a note in
     SolarWinds: 'campus-as1 (BLDG 2)', 'campus-as1 [BLDG 2]', 'campus-as1 - BLDG 2' ->
     ('campus-as1', 'BLDG 2'). 'campus-as1' -> ('campus-as1', '')."""
-    if _IPV6.match((caption or '').strip()):         # a node captioned by its IPv6 address
-        return caption.strip(), ''
+    v6 = _ipv6_prefix((caption or '').strip())       # a node captioned by its IPv6 address
+    m = _CAPTION_REST.match(caption.strip()[v6.end():]) if v6 else _CAPTION.match(caption or '')
+    if v6:
+        return v6.group(0), _note(m.group(1))
     m = _CAPTION.match(caption or '')
     if not m:
         return (caption or '').strip(), ''
-    note = m.group(2)
+    return m.group(1), _note(m.group(2))
+
+
+def _note(note):
     while note and (note[0] + note[-1] in ('()', '[]', '{}', '<>', '""') or note[0] in '-:/|,'):
         note = (note[1:-1] if note[0] + note[-1] in ('()', '[]', '{}', '<>', '""') else note[1:]).strip()
-    return m.group(1), note
+    return note
 
 
 def device_key(hostname, note=''):

@@ -11,7 +11,7 @@ import re
 
 from . import parsers
 from .kinds import kind_of, slot_of, member_of, MODULE_KINDS, KIND_ORDER, extra_kind
-from .textutil import device_key, is_ipv4, norm_host, read_text, real_serial, short_host, split_caption
+from .textutil import device_key, is_ip, is_ipv4, norm_host, read_text, real_serial, short_host, split_caption
 
 OK_STATUS = re.compile(r'(?i)^(ok|active|standby|ha-standby|pass|ready)\b')
 
@@ -159,6 +159,11 @@ def _different_boxes(a, b):
         return not (a['inv'] & b['inv'])
     if a['ver'] and b['ver']:
         return not ((a['ver'] | a['inv']) & (b['ver'] | b['inv']))
+    if (a['inv'] or a['ver']) and (b['inv'] or b['ver']) and a.get('ips') and b.get('ips'):
+        # one side has only inventory serials, the other only a show version serial: they
+        # cannot be compared. Different IP addresses then mean two boxes (listed twice at
+        # worst - better than one of them vanishing into the other)
+        return not ((a['inv'] | a['ver']) & (b['inv'] | b['ver'])) and not (a['ips'] & b['ips'])
     return False
 
 
@@ -293,7 +298,7 @@ def _group_sections(sections, stats):
         for x in order:
             if find(x) == r and blocks[x]['key'] not in keys:
                 keys.append(blocks[x]['key'])
-        key = min(keys, key=lambda k: (' | ' not in k, is_ipv4(k) or k.startswith('unidentified:'),
+        key = min(keys, key=lambda k: (' | ' not in k, is_ip(k) or k.startswith('unidentified:'),
                                        keys.index(k)))
         n = 2
         base = key
@@ -429,17 +434,33 @@ def _apply_module(dev, text, stats):
 
 def _find_chassis(dev, hw, stacked):
     """No inventory entry was recognised as the chassis (a model whose chassis line is not
-    named 'Chassis' / 'Switch N'): the entry carrying show version's serial is the chassis,
-    whatever it is called. Without show version, the first inventory entry is - on Cisco gear it
-    always lists the box first - if it was not recognised as anything else."""
-    ver_sn = real_serial(dev.get('_ver_serial'))
-    if ver_sn:
-        for it in hw:
-            if it['kind'] in ('other', 'builtin') and real_serial(it.get('serial')) == ver_sn:
-                it['kind'] = 'chassis'
-                return
-    elif not stacked and hw and hw[0]['kind'] == 'other' and real_serial(hw[0].get('serial')):
-        hw[0]['kind'] = 'chassis'
+    named 'Chassis' / 'Switch N', e.g. 'VG310' or 'CISCO2911/K9'). Pick the unrecognised entry
+    that says it is one, best first:
+      1. its description says 'chassis' (an ISR G2 / VG3x0 'CISCO2911/K9 chassis, Hw Serial#')
+      2. it carries show version's serial (Processor board ID)
+      3. its PID is show version's model
+      4. no show version at all: the one entry named after its own PID - only if there is
+         exactly one (an IE3400 lists its expansion module the same way: then nothing)
+    Nothing else - a route processor, a disk or a module listed first is not the box."""
+    if stacked:
+        return
+    ver_sn, ver_model = real_serial(dev.get('_ver_serial')), dev.get('_ver_model') or ''
+    cands = [it for it in hw if it['kind'] in ('other', 'builtin') and real_serial(it.get('serial'))
+             and not member_of(it)]
+    tests = [lambda it: re.search(r'(?i)\bchassis\b', it['descr'] or '') and (not ver_model or it['pid'] == ver_model),
+             lambda it: ver_sn and real_serial(it['serial']) == ver_sn,
+             lambda it: ver_model and it['pid'] == ver_model]
+    named = [it for it in cands if it['pid'] and it['name'].strip().upper() == it['pid'].strip().upper()]
+    if not ver_sn and not ver_model and len(named) == 1:
+        tests.append(lambda it: it is named[0])
+    for test in tests:
+        hit = [it for it in cands if test(it)]
+        if hit:
+            hit[0]['kind'] = 'chassis'
+            return
+
+
+_OWN_LINE = re.compile(r'(?i)\b(system|chassis)\b')
 
 
 def _finish_device(dev, nodes):
@@ -469,15 +490,18 @@ def _finish_device(dev, nodes):
                        'sw': t.get('sw_version') or '', 'role': 'active' if t.get('active') else 'member'})
     if not any(it['kind'] in ('chassis', 'stack_member') for it in hw):
         _find_chassis(dev, hw, len(table) > 1)
-    chassis_pids = {it['pid'] for it in hw if it['kind'] == 'chassis' and it['pid']}
-    for it in hw:
-        if it['kind'] == 'other' and it['pid'] in chassis_pids:
-            it['kind'] = 'builtin'          # unrecognised, but the chassis' own PID: part of it
     if not any(it['kind'] in ('chassis', 'stack_member') for it in hw) and dev.get('_ver_model'):
         # no chassis in show inventory (or none collected): the box itself, from show version
         hw.insert(0, {'kind': 'chassis', 'slot': '', 'member': '', 'name': 'Chassis (show version)',
                       'descr': '', 'pid': dev['_ver_model'], 'vid': '',
                       'serial': real_serial(dev.get('_ver_serial')), 'status': '', 'sw': '', 'role': ''})
+    chassis_pids = {it['pid'] for it in hw if it['kind'] == 'chassis' and it['pid']}
+    for it in hw:
+        # unrecognised, but the chassis' own PID: part of it (a VG310's FXS ports, a board).
+        # Not a line that is a box of its own: 'Switch 2 System' of a VSS pair, 'Chassis 2'
+        if (it['kind'] == 'other' and it['pid'] in chassis_pids and not member_of(it)
+                and not _OWN_LINE.search(it['name'] or '')):
+            it['kind'] = 'builtin'
 
     # FEX: state and name from 'show fex'.
     for it in hw:
@@ -584,19 +608,21 @@ def drop_unserialized(dev):
 
 
 def apply_kind_rules(devices):
-    """Re-check parts still 'other' against the settings rules (kinds.set_extra_rules), so a
-    rule added after an import applies without re-importing; then flag what is still
-    unrecognised, one issue per device."""
+    """The local rules (kinds.set_extra_rules) on a loaded snapshot: they name parts, never a
+    chassis / stack member / FEX. Then flag what is still unrecognised, one issue per device."""
     for d in devices:
         left = []
+        boxes = set(it['pid'] for it in d['hardware'] if it['kind'] in ('chassis', 'stack_member') and it['pid'])
         for it in d['hardware']:
+            # not: a Kind typed on the manual sheet, or a part with the box's own PID (a
+            # chassis' built-in ports: counting them would count the box twice)
+            if not it.get('kind_given') and it['pid'] not in boxes:
+                it['kind'] = extra_kind(it) or it['kind']
             if it['kind'] == 'other':
-                it['kind'] = extra_kind(it) or 'other'
-                if it['kind'] == 'other':
-                    left.append(it)
+                left.append(it)
         if left and d.get('source') != 'manual':
-            d['warnings'].append('Unrecognised part%s (listed and counted as Unrecognised; a '
-                                 'kind_rules entry in settings.json can name it): %s'
+            d['warnings'].append('Unrecognised part%s (listed and counted as Unrecognised; '
+                                 'double-click it on the Inventory tab to name it): %s'
                                  % ('s' if len(left) > 1 else '',
                                     ', '.join('%s %s' % (it['name'], it['pid']) for it in left)))
 

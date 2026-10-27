@@ -7,7 +7,8 @@ import re
 from .kinds import KIND_LABELS, KIND_ORDER, MODULE_KINDS
 from .history import seen_text
 from .model import display_name, in_inventory, part_counts, part_identity
-from .roles import role_label
+from .roles import role_label, role_name, valid_rules as valid_role_rules
+from .kinds import valid_rules as valid_kind_rules
 from . import VERSION
 
 # --------------------------------------------------------------------------- workbook
@@ -82,6 +83,8 @@ def device_parts(d):
             uplinks = [it for it in hw if it['kind'] == 'module' and it['member'] == m['slot']]
             out.append(('%s(%s)' % (d['hostname'], m['slot']),
                         'Stack member' + (' (%s)' % m['role'] if m['role'] else ''), m, uplinks))
+        # parts NetInv could not place (Unrecognised): listed, so they can be named
+        out += [(unit_name(it), KIND_LABELS['other'], it, None) for it in hw if it['kind'] == 'other']
         return out
     return [(unit_name(it), KIND_LABELS.get(it['kind'], it['kind']), it, None)
             for it in sorted((it for it in hw if it['kind'] in PART_KINDS), key=part_order)]
@@ -177,10 +180,12 @@ def excluded_note(networks):
     return 'Not counted: %s, left out by exclusion rules.' % joined
 
 
-def about_sheet(snaps, include_optics=False, generated=None, shared_serials=None):
+def about_sheet(snaps, include_optics=False, generated=None, shared_serials=None, kind_rules=None,
+                role_rules=None):
     """The 'About' sheet that opens the inventory workbook: what it covers and how parts are
     counted, so a reader does not have to guess. snaps: [(network, snapshot as loaded)];
-    shared_serials: the acknowledged shared / default serials."""
+    shared_serials: the acknowledged shared / default serials; kind_rules / role_rules: the
+    local rules from settings.json, so a reader knows which labels came from them."""
     generated = generated or datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     rows = [['Generated', '%s (NetInv %s)' % (generated, VERSION)]]
     for name, snap in snaps:
@@ -202,6 +207,16 @@ def about_sheet(snaps, include_optics=False, generated=None, shared_serials=None
         rows.append(['Shared serials', 'These serial numbers are factory default serials reported by '
                      'different parts, so each part reporting one is counted separately: %s.'
                      % ', '.join(sorted(shared_serials))])
+    kind_rules, role_rules = valid_kind_rules(kind_rules), valid_role_rules(role_rules)
+    if kind_rules:
+        rows.append(['Local part rules', 'Kinds set by local rules (not built into NetInv): ' + '; '.join(
+            '%s matching %s -> %s' % ({'pid': 'PID', 'descr': 'description', 'any': 'name or description'}
+                                      .get(r[1], r[1]), r[2], KIND_LABELS.get(r[0], r[0]))
+            for r in kind_rules) + '.'])
+    if role_rules:
+        rows.append(['Local role rules', 'Roles set by local rules from the model, when the hostname '
+                     'does not give one: ' + '; '.join('model matching %s -> %s' % (r[1], role_name(r[0]))
+                                                      for r in role_rules) + '.'])
     stale = [(name, d) for name, snap in snaps for d in snap['devices'] if d.get('stale')]
     if stale:
         rows.append(['Not reached', '%d device%s could not be reached by SolarWinds this round; the '
