@@ -14,13 +14,15 @@ import re
 # Kinds the inventory counts as "modules" (field-replaceable boards).
 MODULE_KINDS = ('supervisor', 'linecard', 'fabric', 'sysctrl', 'module')
 # Kinds listed but not counted as modules.
-OTHER_KINDS = ('chassis', 'stack_member', 'fex', 'power', 'fan', 'builtin', 'other')
+OTHER_KINDS = ('chassis', 'stack_member', 'fex', 'power', 'fan', 'builtin', 'stack_cable', 'storage',
+               'acknowledged', 'other')
 # Kinds never listed. Optics ('transceiver') are kept but hidden unless the workspace setting
 # include_optics is on (model.hide_optics).
 EXCLUDED_KINDS = ('stack',)
 # Order of kinds in lists and the Part counts sheet.
 KIND_ORDER = ('chassis', 'stack_member', 'fex', 'supervisor', 'linecard', 'fabric', 'sysctrl',
-              'module', 'power', 'fan', 'transceiver', 'builtin', 'other')
+              'module', 'power', 'fan', 'stack_cable', 'storage', 'transceiver', 'builtin', 'acknowledged',
+              'other')
 
 KIND_LABELS = {
     'chassis': 'Chassis', 'stack_member': 'Stack member', 'fex': 'Fabric extender (FEX)', 'supervisor': 'Supervisor',
@@ -28,6 +30,7 @@ KIND_LABELS = {
     'module': 'Module (NIM/SM/uplink)', 'power': 'Power supply', 'fan': 'Fan',
     'transceiver': 'Optic / transceiver', 'stack': 'Stack (logical)',
     'builtin': 'Built-in (part of chassis)', 'other': 'Unrecognised',
+    'stack_cable': 'Stack cable', 'storage': 'Harddisk / SSD', 'acknowledged': 'Acknowledged',
 }
 
 _INTF_NAME = (r'^(Gi|Te|Fo|Hu|Twe|Tw|Fi|Ap|Et|Eth|Ethernet|GigabitEthernet|TenGigabitEthernet|'
@@ -59,7 +62,11 @@ RULES = [
                       r'C3KX-NM|PVDM|C9300-NM)'),
     ('transceiver', 'pid', r'^(SFP|GLC|QSFP|CVR|CFP|XFP|X2-|XENPAK|DWDM-|CWDM-|ONS-S|DS-SFP|'
                            r'MA-SFP|QDD-|Q28-|SFP28|10G-|1000BASE)'),
+    ('stack_cable', 'pid', r'^(STACK-T\d|STACK-|CAB-STK|CAB-SPWR)'),    # StackWise / StackPower cables
+    ('storage', 'pid', r'-SSD-'),
     # --- name patterns ---
+    ('stack_cable', 'name', r'(?i)stack ?port'),                       # 'Switch 1 - StackPort 1'
+    ('storage', 'any', r'(?i)\b(ssd|harddisk|hard drive|disk drive)\b'),
     ('transceiver', 'name', r'(?i)transceiver'),
     ('transceiver', 'name', _INTF_NAME),
     ('power', 'any', r'(?i)power supply|\bPSU\b|\bPEM\b'),
@@ -78,7 +85,7 @@ FIELDS = ('pid', 'name', 'descr', 'any')
 # What a local rule may make a part. Never chassis / stack member / FEX: which box is which
 # is decided by the parser, a rule only names parts.
 RULE_KINDS = ('supervisor', 'linecard', 'fabric', 'sysctrl', 'module', 'power', 'fan',
-              'transceiver', 'builtin', 'other')
+              'transceiver', 'builtin', 'stack_cable', 'storage', 'acknowledged', 'other')
 BOX_KINDS = ('chassis', 'stack_member', 'fex', 'stack')
 
 

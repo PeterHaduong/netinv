@@ -26,7 +26,11 @@ INVENTORY_HEADER = ['Device', 'Unit', 'Kind', 'Model / PID', 'Serial', 'Uplink m
                     'Uplink module serial', 'Description', 'Software', 'Status / role', 'Mgmt IP',
                     'Site', 'SNMP location', 'Platform', 'Uptime', 'Notes']
 PART_KINDS = ('supervisor', 'linecard', 'fabric', 'sysctrl', 'module', 'fex', 'power', 'fan',
-              'transceiver', 'builtin', 'other')
+              'transceiver', 'builtin', 'stack_cable', 'storage', 'acknowledged', 'other')
+# Listed under a stack too (its members and uplink modules are listed anyway)
+STACK_EXTRA_KINDS = ('stack_cable', 'storage', 'acknowledged', 'other')
+# Part counts columns from settings "part_metadata" ({PID: {...}}), edited on the Part counts tab
+EOL_COLUMNS = (('vuln_support', 'End of Vulnerability Support'), ('bulletin_id', 'EOL Bulletin ID'))
 _DEVICE_FILL = 'DDEBF7'
 _STALE_FILL = 'E7E6E6'
 
@@ -83,8 +87,9 @@ def device_parts(d):
             uplinks = [it for it in hw if it['kind'] == 'module' and it['member'] == m['slot']]
             out.append(('%s(%s)' % (d['hostname'], m['slot']),
                         'Stack member' + (' (%s)' % m['role'] if m['role'] else ''), m, uplinks))
-        # parts NetInv could not place (Unrecognised): listed, so they can be named
-        out += [(unit_name(it), KIND_LABELS['other'], it, None) for it in hw if it['kind'] == 'other']
+        # stack cables, disks, acknowledged and unrecognised parts: listed, so they can be seen / named
+        out += [(unit_name(it), KIND_LABELS[it['kind']], it, None)
+                for it in sorted((it for it in hw if it['kind'] in STACK_EXTRA_KINDS), key=part_order)]
         return out
     return [(unit_name(it), KIND_LABELS.get(it['kind'], it['kind']), it, None)
             for it in sorted((it for it in hw if it['kind'] in PART_KINDS), key=part_order)]
@@ -152,13 +157,19 @@ def _serial_note(r):
     return ''
 
 
-def part_count_sheet(networks):
-    """Unique part numbers with how many there are: a Total column plus one per network."""
+def part_count_sheet(networks, part_metadata=None):
+    """Unique part numbers with how many there are: the EOL columns (settings "part_metadata",
+    edited on the app's Part counts tab), a Total column, then one per network."""
+    part_metadata = part_metadata if isinstance(part_metadata, dict) else {}
     names = [name for name, _ in networks]
-    rows = [[KIND_LABELS.get(r['kind'], r['kind']), r['pid'], r['descr'], r['total']]
-            + [r['counts'].get(n, 0) for n in names] for r in part_counts(networks)]
-    return ('Part counts', ['Kind', 'PID', 'Description', 'Total'] + names, rows,
-            {'table': 'PartCounts', 'wrap': {2: 45}})
+    rows = []
+    for r in part_counts(networks):
+        meta = part_metadata.get(r['pid']) or {}
+        rows.append([KIND_LABELS.get(r['kind'], r['kind']), r['pid'], r['descr']]
+                    + [meta.get(k, '') if isinstance(meta, dict) else '' for k, _ in EOL_COLUMNS]
+                    + [r['total']] + [r['counts'].get(n, 0) for n in names])
+    return ('Part counts', ['Kind', 'PID', 'Description'] + [h for _, h in EOL_COLUMNS] + ['Total'] + names,
+            rows, {'table': 'PartCounts', 'wrap': {2: 45}})
 
 
 def workbook_sheets(devices, network='Inventory'):
@@ -229,12 +240,13 @@ def about_sheet(snaps, include_optics=False, generated=None, shared_serials=None
     return ('About', ['Item', 'Details'], rows, {'table': 'About', 'wrap': {1: 100}})
 
 
-def workbook_for_networks(networks, changes=None, baselines=None, about=None):
+def workbook_for_networks(networks, changes=None, baselines=None, about=None, part_metadata=None):
     """networks: [(name, devices)] -> sheets for write_xlsx: one grouped report sheet per
     network, then shared sortable tables with a Network column. Devices left out by exclusion
     rules are not passed in, so they appear nowhere here (see excluded_workbook).
     changes: optional {network: [(change, hostname, detail)]}; baselines: {network: date of the
-    snapshot they were compared with}; about: optional About sheet (about_sheet) to open with."""
+    snapshot they were compared with}; about: optional About sheet (about_sheet) to open with;
+    part_metadata: settings "part_metadata" for the Part counts EOL columns."""
     sheets = ([about] if about else []) + [inventory_sheet(name, devs) for name, devs in networks]
     dev_rows, hw_rows, issue_rows = [], [], []
     for name, devices in networks:
@@ -275,7 +287,7 @@ def workbook_for_networks(networks, changes=None, baselines=None, about=None):
                       'First seen', 'Last seen', 'Seen', 'Notes'],
          hw_rows, {'table': 'Hardware', 'wrap': {6: 40, 16: 40}}),
         serial_sheet(networks),
-        part_count_sheet(networks),
+        part_count_sheet(networks, part_metadata),
         ('Issues', ['Network', 'Hostname', 'Issue'], issue_rows, {'table': 'Issues', 'wrap': {2: 90}}),
     ]
     if changes is not None:
@@ -289,7 +301,7 @@ def workbook_for_networks(networks, changes=None, baselines=None, about=None):
 EXCLUDED_SUFFIX = ' (excluded)'
 
 
-def excluded_workbook(networks):
+def excluded_workbook(networks, part_metadata=None):
     """The separate workbook of devices left out by exclusion rules (e.g. another team's gear on
     a shared SolarWinds). networks: [(name, excluded devices)]. Same layout as the inventory
     workbook - every network name marked '(excluded)' so a copied sheet cannot be mistaken for
@@ -305,7 +317,7 @@ def excluded_workbook(networks):
                          'inventory workbook. The Exclusion rules sheet names the rule for each device.']],
         {'table': 'About', 'wrap': {1: 100}})
     return ([about, ('Exclusion rules', ['Network', 'Device', 'Model', 'Serial', 'Excluded by rule'], rules,
-                     {'table': 'ExclusionRules'})] + workbook_for_networks(marked))
+                     {'table': 'ExclusionRules'})] + workbook_for_networks(marked, part_metadata=part_metadata))
 
 
 # --------------------------------------------------------------------------- masking

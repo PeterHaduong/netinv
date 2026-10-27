@@ -33,7 +33,7 @@ from .commands import CATALOG, script_text
 from .history import DEFAULT_KEEP_DAYS
 from .manual import template_sheets
 from .model import SHARED_WARNING, display_name, excluded_by, in_inventory, part_counts
-from .report import (workbook_for_networks, excluded_workbook, about_sheet, excluded_note,
+from .report import (EOL_COLUMNS, workbook_for_networks, excluded_workbook, about_sheet, excluded_note,
                      device_kind, device_parts, feasibility_report)
 from .kinds import BOX_KINDS, KIND_LABELS, RULE_KINDS, compile_rule, rule_hits, rule_list
 from .roles import LABEL as ROLE_LABEL, compile_role_rule, role_from_hostname, role_label, role_name
@@ -748,8 +748,9 @@ class App(object):
         self.tabs = ttk.Notebook(body, width=self.px(600))
         self.tabs.pack(side='left', fill='both', expand=True)
         self._build_inventory()
-        self.counts = self._simple_tab('Part counts', ('Kind', 'PID', 'Description', 'Total'),
-                                       (150, 200, 380, 70))
+        self.counts = self._simple_tab('Part counts', ('Kind', 'PID', 'Description', 'End of Vulnerability Support',
+                                                       'EOL Bulletin ID', 'Total'), (150, 150, 250, 180, 120, 70))
+        self.counts.bind('<Double-1>', self.do_edit_part_metadata)
         self.issues = self._simple_tab('Issues', ('Network', 'Device', 'Issue'), (120, 200, 700))
         self._build_changes()
         self._build_outputs()
@@ -1242,20 +1243,25 @@ class App(object):
                 self.tree.item(did, open=state)
 
     def fill_counts(self):
-        """Columns: Kind, PID, Description, Total, then one per selected network (excluded
-        devices are not counted - as in the inventory workbook)."""
+        """Columns: Kind, PID, Description, the EOL columns (double-click a row to edit them),
+        Total, then one per selected network (excluded devices are not counted - as in the
+        inventory workbook)."""
         nets = [n for n in self.selected_networks() if self.snaps.get(n)]
-        heads = ('Kind', 'PID', 'Description', 'Total') + tuple(nets)
+        heads = ('Kind', 'PID', 'Description') + tuple(h for _, h in EOL_COLUMNS) + ('Total',) + tuple(nets)
+        eol = len(EOL_COLUMNS)
         tree = self.counts
         tree.delete(*tree.get_children())
         ids = tuple('c%d' % i for i in range(len(heads)))     # network names may contain spaces
         tree.configure(columns=ids)
-        for i, (h, w) in enumerate(zip(heads, (150, 200, 380, 70) + (90,) * (len(heads) - 4))):
+        for i, (h, w) in enumerate(zip(heads, (150, 150, 250, 180, 120, 70) + (90,) * (len(heads) - 6))):
             tree.heading(ids[i], text=h)
-            tree.column(ids[i], width=self.px(w), anchor='w' if i < 3 else 'e')
+            tree.column(ids[i], width=self.px(w), anchor='w' if i < 3 + eol else 'e')
+        part_metadata = self._part_metadata()
         for r in part_counts([(n, self.snaps[n]['devices']) for n in nets]):
-            tree.insert('', 'end', values=(KIND_LABELS.get(r['kind'], r['kind']), r['pid'], r['descr'],
-                                           r['total']) + tuple(r['counts'].get(n, 0) for n in nets))
+            meta = part_metadata.get(r['pid']) or {}
+            tree.insert('', 'end', values=(KIND_LABELS.get(r['kind'], r['kind']), r['pid'], r['descr'])
+                        + tuple(meta.get(k, '') for k, _ in EOL_COLUMNS)
+                        + (r['total'],) + tuple(r['counts'].get(n, 0) for n in nets))
         note = excluded_note([(n, self.snaps[n].get('excluded', [])) for n in nets])
         if note:
             tree.note.config(text=note + ' They are on the Inventory tab, in each network\'s '
@@ -1264,6 +1270,65 @@ class App(object):
         else:
             tree.note.grid_remove()
         self._autosize(tree, stretch='c2')                    # Description takes the spare width
+
+    def _part_metadata(self):
+        """settings "part_metadata": {PID: {'vuln_support': ..., 'bulletin_id': ...}}"""
+        meta = self.ws.settings().get('part_metadata')
+        return dict((pid, m) for pid, m in meta.items() if isinstance(m, dict)) if isinstance(meta, dict) else {}
+
+    def do_edit_part_metadata(self, event):
+        """Double-click a Part counts row: edit that PID's End of Vulnerability Support and EOL
+        Bulletin ID (kept in settings.json, shown here and on the workbook's Part counts sheet)."""
+        item = self.counts.identify_row(event.y)
+        values = self.counts.item(item, 'values') if item else ()
+        if not values or len(values) < 2 or not values[1]:
+            return None
+        pid = values[1]
+        meta = self._part_metadata().get(pid, {})
+        dialog = tk.Toplevel(self.root)
+        dialog.title('EOL information - %s' % pid)
+        dialog.transient(self.root)
+        f = ttk.Frame(dialog, padding=12)
+        f.pack(fill='both', expand=True)
+        ttk.Label(f, text='PID: %s' % pid, font=('Segoe UI', 10, 'bold')).grid(row=0, column=0, columnspan=2,
+                                                                               sticky='w', pady=(0, 8))
+        fields = []
+        for i, (key, label) in enumerate(EOL_COLUMNS):
+            ttk.Label(f, text=label + ':').grid(row=1 + i, column=0, sticky='w', pady=4)
+            v = tk.StringVar(value=meta.get(key, ''))
+            e = ttk.Entry(f, textvariable=v, width=30)
+            e.grid(row=1 + i, column=1, sticky='we', padx=(8, 0), pady=4)
+            fields.append((key, v, e))
+        ttk.Label(f, foreground='#555', text='Leave both empty to remove it.').grid(
+            row=1 + len(EOL_COLUMNS), column=0, columnspan=2, sticky='w')
+
+        def save(event=None):
+            settings = self.ws.settings()
+            all_meta = settings.get('part_metadata') if isinstance(settings.get('part_metadata'), dict) else {}
+            new = dict((key, v.get().strip()) for key, v, _ in fields if v.get().strip())
+            if new:
+                all_meta[pid] = dict(all_meta.get(pid) if isinstance(all_meta.get(pid), dict) else {}, **new)
+                for key, v, _ in fields:          # a field emptied on purpose is removed
+                    if not v.get().strip():
+                        all_meta[pid].pop(key, None)
+            else:
+                all_meta.pop(pid, None)
+            settings['part_metadata'] = all_meta
+            self.ws.save_settings(settings)
+            dialog.destroy()
+            self.fill_counts()
+            self.set_status('Saved EOL information for %s' % pid)
+        bb = ttk.Frame(f)
+        bb.grid(row=2 + len(EOL_COLUMNS), column=0, columnspan=2, sticky='e', pady=(10, 0))
+        ttk.Button(bb, text='Save', command=save).pack(side='left', padx=4)
+        ttk.Button(bb, text='Cancel', command=dialog.destroy).pack(side='left')
+        f.columnconfigure(1, weight=1)
+        dialog.bind('<Return>', save)
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        _fit_screen(dialog)
+        dialog.grab_set()
+        fields[0][2].focus_set()
+        return 'break'
 
     def fill_issues(self):
         self.issues.delete(*self.issues.get_children())
@@ -1574,12 +1639,13 @@ class App(object):
         about = about_sheet([(n, self.snaps[n]) for n in nets], self.ws.include_optics(),
                             shared_serials=self.ws.shared_serials(),
                             kind_rules=settings.get('kind_rules'), role_rules=settings.get('role_rules'))
+        part_metadata = self._part_metadata()
         compared = self._changes_for(nets)       # baselines come from memory (_load)
         changes = dict((n, rows) for n, (_, rows) in compared.items())
         baselines = dict((n, since) for n, (since, _) in compared.items())
 
         def work():
-            write_xlsx(path, workbook_for_networks(data, changes, baselines, about))
+            write_xlsx(path, workbook_for_networks(data, changes, baselines, about, part_metadata))
             return path
 
         def done(p):
@@ -1595,7 +1661,8 @@ class App(object):
         path = os.path.join(self._outdir(), 'excluded_%s.xlsx' % ('_'.join(nets) if len(nets) <= 3 else 'all'))
 
         def work():
-            write_xlsx(path, excluded_workbook([(n, self.snaps[n]['excluded']) for n in nets]))
+            write_xlsx(path, excluded_workbook([(n, self.snaps[n]['excluded']) for n in nets],
+                                               self._part_metadata()))
             return path
 
         def done(p):

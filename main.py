@@ -148,10 +148,11 @@ def main(argv=None):
         nets = args.networks or ws.networks()
         snaps = dict((n, ws.load(n)) for n in nets)
         if args.excluded:
-            write_xlsx(args.out, excluded_workbook([(n, snaps[n]['excluded']) for n in nets]))
+            write_xlsx(args.out, excluded_workbook([(n, snaps[n]['excluded']) for n in nets],
+                                                   ws.settings().get('part_metadata')))
         else:
             write_xlsx(args.out, workbook_for_networks(
-                [(n, snaps[n]['devices']) for n in nets],
+                [(n, snaps[n]['devices']) for n in nets], part_metadata=ws.settings().get('part_metadata'),
                 about=about_sheet([(n, snaps[n]) for n in nets], ws.include_optics(),
                                   shared_serials=ws.shared_serials(),
                                   kind_rules=ws.settings().get('kind_rules'),

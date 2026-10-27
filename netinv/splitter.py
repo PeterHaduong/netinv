@@ -105,7 +105,8 @@ class Section(object):
 
 def match_command(cmd_text):
     """Map typed command text to a canonical key, or None."""
-    if 'snmp-server location' in cmd_text.lower():       # show run | include snmp-server location
+    if 'snmp-server location' in cmd_text.lower() or 'location' in cmd_text.lower():
+        # show run | include snmp-server location, show run | section location
         return 'location'
     cmd_text = cmd_text.split('|')[0].strip().lower()
     words = cmd_text.split()

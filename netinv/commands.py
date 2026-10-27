@@ -23,7 +23,7 @@ CATALOG = [
      'C9300/C9400 and NX-OS (C8300/ISR reject it - skipped)', True),
     ('show fex', 'FEX name and state',
      'NX-OS FEX parents (others reject it - skipped)', True),
-    ('show running-config | include snmp-server location', 'SNMP location column',
+    ('show running-config | section location', 'SNMP location column',
      'all', True),
     ('show vdc', 'VDC names on the Nexus 7700 (one chassis, counted once)',
      'NX-OS (IOS rejects it - skipped)', True),

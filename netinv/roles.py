@@ -40,7 +40,7 @@ LABEL = {'br': 'Border router', 'xr': 'External router', 'xts': 'External transp
          'core': 'Core switch', 'spine': 'Spine', 'dist': 'Distribution', 'leaf': 'Leaf',
          'border': 'Border leaf', 'access': 'Access switch', 'fex': 'Fabric extender',
          'sw': 'Switch (L2)', 'firewall': 'Firewall', 'dmz': 'DMZ switch',
-         'voice': 'Analog voice gateway'}
+         'voice': 'Analog voice gateway', 'other': 'Other'}
 _EXTRA = []
 
 

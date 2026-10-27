@@ -169,3 +169,15 @@ python -m unittest discover -s tests     # back-tests every real-output fixture 
 
 See [REFINING.md](REFINING.md). (The synthetic test suite, sample data and design notes are kept
 by the developer and are not part of this repository.)
+
+## Versions
+
+The version is in the title bar and on the workbook's About sheet. Data (inventory_data, settings.json)
+works with any of these versions in both directions.
+
+* **0.3.0** - EOL columns on Part counts (double-click a row to edit; also in the workbook);
+  Stack cable, Harddisk / SSD and Acknowledged kinds (stack cables and SSDs listed under stacks);
+  "Other" role; SNMP location collected with `show running-config | section location`.
+* **0.2.x** - part / role rules dialog, shared (default) serials, built-in parts listed, chassis
+  found by serial (VG310, ISR G2), IPv4/IPv6 duplicates, GUI scaling and speed with large networks.
+

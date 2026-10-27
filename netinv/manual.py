@@ -25,7 +25,8 @@ COLUMNS = ['Network', 'Location', 'Hostname', 'Unit', 'Kind', 'PID', 'Serial', '
 KIND_CHOICES = [('Chassis', 'chassis'), ('Stack member', 'stack_member'), ('FEX', 'fex'),
                 ('Supervisor', 'supervisor'), ('Line card', 'linecard'), ('Fabric module', 'fabric'),
                 ('System controller', 'sysctrl'), ('Module', 'module'), ('Power supply', 'power'),
-                ('Fan', 'fan'), ('Optic', 'transceiver'), ('Other', 'other')]
+                ('Fan', 'fan'), ('Optic', 'transceiver'), ('Stack cable', 'stack_cable'),
+                ('Harddisk / SSD', 'storage'), ('Acknowledged', 'acknowledged'), ('Other', 'other')]
 STATUS_CHOICES = ['Installed', 'Spare', 'RMA', 'Loaner', 'Failed']
 
 _KIND_WORDS = dict((label.lower(), kind) for label, kind in KIND_CHOICES)
@@ -34,7 +35,9 @@ _KIND_WORDS.update((kind, kind) for _, kind in KIND_CHOICES)
 _KIND_WORDS.update({'switch': 'stack_member', 'member': 'stack_member', 'router': 'chassis',
                     'psu': 'power', 'power': 'power', 'sup': 'supervisor', 'linecard': 'linecard',
                     'card': 'linecard', 'sfp': 'transceiver', 'transceiver': 'transceiver',
-                    'fabric extender': 'fex', 'nim': 'module', 'uplink module': 'module'})
+                    'fabric extender': 'fex', 'nim': 'module', 'uplink module': 'module',
+                    'stack cable': 'stack_cable', 'cable': 'stack_cable', 'ssd': 'storage',
+                    'harddisk': 'storage', 'storage': 'storage', 'acknowledged': 'acknowledged'})
 
 # Header names accepted for each column (lower case).
 _ALIASES = {
